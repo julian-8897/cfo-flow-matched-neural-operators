@@ -102,7 +102,7 @@ def continuous_resolution_demo(
             mo.md(
                 f"CFO uses **{_n_steps} steps** at the chosen resolution. "
                 f"AR is always fixed to {_ar_steps} steps at its training Δt. "
-                "Change the slider: the CFO trajectory updates instantly — no retraining."
+                "Change the slider: the CFO trajectory updates instantly without retraining."
             ),
             kind="info",
         ),
@@ -138,7 +138,7 @@ def parametric_intro(mo):
     of attractors at once. At inference, setting $\\rho$ yields a continuous vector field for
     that attractor without retraining.
 
-    This is not in the original paper — it is the notebook's primary novel contribution.
+    This is not in the original paper. It is the notebook's primary novel contribution.
     The model conditions on normalised $\\rho$ as an extra scalar input to the network, trained
     jointly on trajectories sampled from $\\rho \\in \\{25, 28, 32, 35, 38\\}$.
     """)

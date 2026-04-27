@@ -42,8 +42,8 @@ def imports():
 @app.cell(hide_code=True)
 def title_cell(mo):
     mo.md(r"""
-    # Reproducing CFO on Lorenz, then Extending it with Parametric Conditioning
-    ## *alphaXiv x marimo competition notebook*
+    # CFO: Learning Continuous-Time PDE Dynamics via Flow-Matched Neural Operators
+    ## *alphaXiv · marimo notebook competition · Reproduction + Novel Extension*
 
     > **Paper**: Hou, Huang & Perdikaris, 2025 · [alphaxiv:2512.05297](https://alphaxiv.org/abs/2512.05297)
 
@@ -98,6 +98,10 @@ def cfo_explainer(mo):
     with any standard solver (RK4 here) to any target time $t^*$, with no fixed grid requirement.
 
     ### The spline trick
+
+    Flow matching, the same objective used in continuous-time generative models, learns a
+    velocity field that transports data forward in time. Here the "data" is a trajectory, and
+    the probability path is defined by a quintic spline.
 
     Given sparse, irregular snapshots $\{(t_i, u_i)\}$, fit a **quintic spline** $s(t)$.
     Its analytic derivative $\partial_t s(t)$ serves as the velocity target, giving the
@@ -180,7 +184,7 @@ def lorenz_viz(LineCollection, mo, np, plt):
 @app.cell(hide_code=True)
 def data_controls(mo):
     keep_rate_slider = mo.ui.slider(
-        start=10,
+        start=20,
         stop=100,
         step=5,
         value=50,
@@ -216,21 +220,8 @@ def data_controls(mo):
 
 
 @app.cell(hide_code=True)
-def data_spline_viz(QuinticHermiteSpline, keep_rate_slider, mo, np, plt):
+def data_spline_viz(QuinticHermiteSpline, keep_rate_slider, lorenz_deriv, mo, np, plt, rk4_np):
     """Visualize full trajectory vs sparse samples vs quintic spline reconstruction."""
-    _sigma, _rho, _beta = 10.0, 28.0, 8.0 / 3.0
-
-    def _lorenz_d(state):
-        x, y, z = state
-        return np.array([_sigma * (y - x), x * (_rho - z) - y, x * y - _beta * z])
-
-    def _rk4s(f, state, dt):
-        k1 = f(state)
-        k2 = f(state + dt / 2 * k1)
-        k3 = f(state + dt / 2 * k2)
-        k4 = f(state + dt * k3)
-        return state + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-
     _DT = 0.025
     _N_STEPS = 200
     _rng_demo = np.random.default_rng(7)
@@ -238,7 +229,7 @@ def data_spline_viz(QuinticHermiteSpline, keep_rate_slider, mo, np, plt):
     _traj_full = np.zeros((_N_STEPS + 1, 3))
     _traj_full[0] = _u0
     for _i in range(_N_STEPS):
-        _traj_full[_i + 1] = _rk4s(_lorenz_d, _traj_full[_i], _DT)
+        _traj_full[_i + 1] = rk4_np(lorenz_deriv, _traj_full[_i], _DT)
     _t_full = np.arange(_N_STEPS + 1) * _DT
 
     # Subsample
@@ -296,7 +287,7 @@ def data_spline_viz(QuinticHermiteSpline, keep_rate_slider, mo, np, plt):
 
     # Right: dx/dt derivative, the CFO training target
     _ax1 = axes_spline[1]
-    _true_du_x = np.array([_lorenz_d(_traj_full[_j])[0] for _j in range(len(_t_full))])
+    _true_du_x = np.array([lorenz_deriv(_traj_full[_j])[0] for _j in range(len(_t_full))])
     _ax1.plot(
         _t_full, _true_du_x, color="#7799ff", lw=1.0, alpha=0.4, label="true dx/dt"
     )
@@ -307,9 +298,9 @@ def data_spline_viz(QuinticHermiteSpline, keep_rate_slider, mo, np, plt):
         lw=1.8,
         linestyle="--",
         alpha=0.9,
-        label="spline dx/dt  ← CFO training target",
+        label="spline dx/dt  ← flow-matching velocity target",
     )
-    _ax1.set_title("dx/dt: spline derivative (CFO training target)", color="#333333")
+    _ax1.set_title("dx/dt: spline derivative (flow-matching velocity target)", color="#333333")
     _ax1.set_xlabel("time (s)")
     _ax1.set_ylabel("dx/dt")
     _ax1.legend(fontsize=8)
@@ -325,12 +316,24 @@ def data_spline_viz(QuinticHermiteSpline, keep_rate_slider, mo, np, plt):
                     "**Left**: sparse observations (dots) and quintic spline reconstruction (black dashed). "
                     "**Right**: the spline's analytic derivative is the flow-matching target that CFO trains on. "
                     "No ODE solver needed: spline derivatives are free. Even at low keep rates the velocity "
-                    "field is well approximated."
+                    "field is well approximated because a quintic Hermite spline with second-order finite-difference "
+                    "knots achieves $O(\\Delta t^2)$ accuracy."
                 ),
                 kind="info",
             ),
         ]
     )
+    return
+
+
+@app.cell(hide_code=True)
+def data_efficiency_intro(mo):
+    mo.md(r"""
+    ### Reconstruction Quality Across Keep Rates
+
+    CFO's training pipeline depends on spline derivatives being accurate even from very sparse data.
+    The plots below quantify reconstruction RMSE as a function of keep rate.
+    """)
     return
 
 
@@ -381,7 +384,7 @@ def data_efficiency_viz(QuinticHermiteSpline, generate_lorenz, mo, np, plt):
         axes_eff[0].scatter(_t_sub, _u_sub[:, 0], color=_col, s=8, alpha=0.5, zorder=4)
 
     axes_eff[0].plot(
-        _t_full, _traj_full[:, 0], color="#222222", lw=0.8, alpha=0.4, label="true"
+        _t_full, _traj_full[:, 0], color="#228866", lw=1.2, alpha=0.7, label="true"
     )
     axes_eff[0].set_title("Spline reconstruction x(t)", color="#333333")
     axes_eff[0].set_xlabel("time (s)")
@@ -415,90 +418,107 @@ def _(mo, plt):
     from matplotlib.patches import FancyBboxPatch
     import matplotlib.patheffects as pe
 
-    fig, ax = plt.subplots(figsize=(15, 6))
-    ax.set_xlim(0, 15)
-    ax.set_ylim(0, 6)
-    ax.axis("off")
-    fig.patch.set_facecolor("#f8f9fb")
-    ax.set_facecolor("#f8f9fb")
+    # ── layout constants ────────────────────────────────────────────────────────
+    _W = 2.20   # box width
+    _H = 0.72   # box height
+    _GAP = 0.55  # gap between boxes
+    _X0 = 1.60  # first box x
+    _YC = {"train": 4.40, "infer": 2.65, "ar": 0.90}  # lane centre y
 
-    # Lane palette
     _LANES = {
-        "train":  {"band": "#e8effe", "box": "#c5d8fa", "accent": "#3366cc", "arrow": "#3366cc"},
-        "infer":  {"band": "#efe8fb", "box": "#d5bbf0", "accent": "#7b3fb5", "arrow": "#7b3fb5"},
-        "ar":     {"band": "#fde8e8", "box": "#f5b8b8", "accent": "#cc2200", "arrow": "#cc2200"},
+        "train": {"band": "#deeaff", "box": "#bed3f8", "end": "#9bbcf5",
+                  "accent": "#2a57c4", "arrow": "#2a57c4"},
+        "infer": {"band": "#ecdeff", "box": "#d2b3f2", "end": "#b88ee8",
+                  "accent": "#6e35a8", "arrow": "#6e35a8"},
+        "ar":    {"band": "#ffe0de", "box": "#f5afaf", "end": "#ee8585",
+                  "accent": "#c01a00", "arrow": "#c01a00"},
     }
 
-    def _band(y_lo, y_hi, key):
-        ax.axhspan(y_lo, y_hi, xmin=0, xmax=1, color=_LANES[key]["band"], zorder=0, alpha=0.55)
+    fig, ax = plt.subplots(figsize=(14, 5.8))
+    ax.set_xlim(0, 14)
+    ax.set_ylim(0, 5.8)
+    ax.axis("off")
+    fig.patch.set_facecolor("#f5f6fa")
+    ax.set_facecolor("#f5f6fa")
 
-    def _box(x, y, w, h, lines, key, bold_first=False):
-        c = _LANES[key]
+    def _band(lane):
+        yc = _YC[lane]
+        ax.axhspan(yc - 0.65, yc + 0.78, color=_LANES[lane]["band"], alpha=0.6, zorder=0)
+
+    def _box(x, yc, lines, lane, terminal=False):
+        c = _LANES[lane]
+        fc = c["end"] if terminal else c["box"]
         patch = FancyBboxPatch(
-            (x, y), w, h,
-            boxstyle="round,pad=0.05",
-            facecolor=c["box"], edgecolor=c["accent"],
-            linewidth=1.4, zorder=2,
+            (x, yc - _H / 2), _W, _H,
+            boxstyle="round,pad=0.06",
+            facecolor=fc, edgecolor=c["accent"],
+            linewidth=1.5 if terminal else 1.2, zorder=2,
         )
         ax.add_patch(patch)
         if isinstance(lines, str):
             lines = [lines]
-        n = len(lines)
-        for i, ln in enumerate(lines):
-            oy = (n - 1 - i) * 0.18 - (n - 1) * 0.09
-            weight = "bold" if (bold_first and i == 0) else "normal"
-            sz = 9.5 if (bold_first and i == 0) else 8.5
-            ax.text(x + w / 2, y + h / 2 + oy, ln,
-                    ha="center", va="center", fontsize=sz,
-                    color="#1a1a2e", fontweight=weight, zorder=3)
+        offsets = [0.13, -0.13] if len(lines) == 2 else [0.0]
+        for ln, oy in zip(lines, offsets):
+            fw = "bold" if terminal else "normal"
+            ax.text(x + _W / 2, yc + oy, ln,
+                    ha="center", va="center", fontsize=9, zorder=3,
+                    color="#0d0d2b", fontweight=fw)
 
-    def _arrow(x1, y1, x2, y2, key):
-        c = _LANES[key]["arrow"]
-        ax.annotate("", xy=(x2, y2), xytext=(x1, y1),
+    def _arr(x1, x2, lane):
+        yc = _YC[lane]
+        c = _LANES[lane]["arrow"]
+        ax.annotate("", xy=(x2, yc), xytext=(x1, yc),
                     arrowprops=dict(arrowstyle="-|>", color=c, lw=1.8,
-                                   mutation_scale=14))
+                                   mutation_scale=13),
+                    zorder=4)
 
-    def _label(x, y, text, key):
-        c = _LANES[key]["accent"]
-        ax.text(x, y, text, fontsize=11, fontweight="bold", color=c,
-                va="center",
-                path_effects=[pe.withStroke(linewidth=3, foreground="#f8f9fb")])
+    def _title(lane, text):
+        yc = _YC[lane]
+        c = _LANES[lane]["accent"]
+        ax.text(0.15, yc + 0.55, text, fontsize=10.5, fontweight="bold", color=c,
+                va="bottom",
+                path_effects=[pe.withStroke(linewidth=3, foreground="#f5f6fa")])
 
-    # ── Lane bands ──────────────────────────────────────────────────────────────
-    _band(3.85, 5.50, "train")
-    _band(2.05, 3.75, "infer")
-    _band(0.25, 1.95, "ar")
+    # ── lanes ───────────────────────────────────────────────────────────────────
+    for _k in ("train", "infer", "ar"):
+        _band(_k)
 
-    # ── CFO Training ────────────────────────────────────────────────────────────
-    _label(0.35, 5.15, "CFO Training", "train")
-    _arrow(1.20, 4.55, 2.10, 4.55, "train")
-    _box(2.10, 4.20, 1.80, 0.70, ["Subsample", "& Normalise"], "train")
-    _arrow(3.90, 4.55, 4.80, 4.55, "train")
-    _box(4.80, 4.20, 1.80, 0.70, ["Quintic", "Spline  s(t)"], "train")
-    _arrow(6.60, 4.55, 7.50, 4.55, "train")
-    _box(7.50, 4.20, 2.10, 0.70, ["Flow-Matching", "Loss  ℒ(t,u,du̇)"], "train")
-    _arrow(9.60, 4.55, 10.50, 4.55, "train")
-    _box(10.50, 4.20, 1.90, 0.70, ["Update  θ", "(Adam)"], "train", bold_first=True)
+    # ── CFO Training  (4 boxes) ─────────────────────────────────────────────────
+    _title("train", "CFO Training")
+    _xs_tr = [_X0 + i * (_W + _GAP) for i in range(4)]
+    _arr(0.55, _xs_tr[0], "train")
+    _box(_xs_tr[0], _YC["train"], ["Sparse data", "subsample"], "train")
+    _arr(_xs_tr[0] + _W, _xs_tr[1], "train")
+    _box(_xs_tr[1], _YC["train"], ["Quintic", "spline  s(t)"], "train")
+    _arr(_xs_tr[1] + _W, _xs_tr[2], "train")
+    _box(_xs_tr[2], _YC["train"], ["Flow-matching", "loss"], "train")
+    _arr(_xs_tr[2] + _W, _xs_tr[3], "train")
+    _box(_xs_tr[3], _YC["train"], ["θ  updated  ↺", "(Adam)"], "train", terminal=True)
 
-    # ── CFO Inference ───────────────────────────────────────────────────────────
-    _label(0.35, 3.35, "CFO Inference", "infer")
-    _arrow(1.20, 2.75, 2.10, 2.75, "infer")
-    _box(2.10, 2.40, 1.30, 0.70, ["u₀"], "infer", bold_first=True)
-    _arrow(3.40, 2.75, 4.30, 2.75, "infer")
-    _box(4.30, 2.40, 2.40, 0.70, ["RK4  +  𝒩θ(t, u)", "any  Δt"], "infer")
-    _arrow(6.70, 2.75, 7.60, 2.75, "infer")
-    _box(7.60, 2.40, 2.30, 0.70, ["Trajectory", "@ any resolution"], "infer")
+    # ── CFO Inference  (3 boxes) ────────────────────────────────────────────────
+    _title("infer", "CFO Inference")
+    _xs_in = [_X0 + i * (_W + _GAP) for i in range(3)]
+    _arr(0.55, _xs_in[0], "infer")
+    _box(_xs_in[0], _YC["infer"], ["u₀"], "infer")
+    _arr(_xs_in[0] + _W, _xs_in[1], "infer")
+    _box(_xs_in[1], _YC["infer"], ["RK4  ·  $\\mathcal{N}_{\\theta}$(t,u)", "query any  Δt"], "infer")
+    _arr(_xs_in[1] + _W, _xs_in[2], "infer")
+    _box(_xs_in[2], _YC["infer"], ["✓  any resolution", "no retraining"], "infer", terminal=True)
 
-    # ── AR Baseline ─────────────────────────────────────────────────────────────
-    _label(0.35, 1.55, "AR Baseline", "ar")
-    _arrow(1.20, 0.95, 2.10, 0.95, "ar")
-    _box(2.10, 0.60, 1.30, 0.70, ["uᵢ"], "ar", bold_first=True)
-    _arrow(3.40, 0.95, 4.30, 0.95, "ar")
-    _box(4.30, 0.60, 2.00, 0.70, ["Fφ(uᵢ) → uᵢ₊₁", "fixed  Δt"], "ar")
-    _arrow(6.30, 0.95, 7.20, 0.95, "ar")
-    _box(7.20, 0.60, 2.30, 0.70, ["Chained preds", "↑ error drift"], "ar")
+    # ── AR Baseline  (3 boxes) ──────────────────────────────────────────────────
+    _title("ar", "AR Baseline")
+    _xs_ar = [_X0 + i * (_W + _GAP) for i in range(3)]
+    _arr(0.55, _xs_ar[0], "ar")
+    _box(_xs_ar[0], _YC["ar"], ["uᵢ"], "ar")
+    _arr(_xs_ar[0] + _W, _xs_ar[1], "ar")
+    _box(_xs_ar[1], _YC["ar"], ["Fφ(uᵢ) → uᵢ₊₁", "fixed  Δt"], "ar")
+    _arr(_xs_ar[1] + _W, _xs_ar[2], "ar")
+    _box(_xs_ar[2], _YC["ar"], ["✗  locked  Δt", "error drift"], "ar", terminal=True)
 
-    plt.tight_layout(pad=0.4)
+    ax.set_title("CFO vs Autoregressive Baseline", fontsize=13,
+                 fontweight="bold", color="#1a1a2e", pad=10)
+
+    plt.tight_layout(pad=0.3)
     _diag_out = mo.center(mo.as_html(fig))
     plt.close(fig)
     _diag_out
@@ -512,15 +532,17 @@ def algorithm_summary(mo):
 
     **CFO Training** (blue lane above): subsample and normalise each trajectory, fit a quintic spline, then train the neural operator $\mathcal{N}_\theta$ to match the spline's analytic derivative via flow-matching MSE. No ODE solver is needed in the backward pass.
 
-    **CFO Inference** (purple lane): at test time, feed the learned vector field into a standard RK4 integrator. Because the model is continuous in time, you can query it at **any** step size without retraining.
+    **CFO Inference** (purple lane): at test time, feed the learned vector field into a standard RK4 integrator. The model outputs $\frac{du}{dt} = N_\theta(t, u)$, a function of time and state rather than a discrete step, so $\Delta t$ is purely an inference hyperparameter. You can query it at **any** step size without retraining.
 
-    **AR Baseline** (red lane): learns a discrete step map $F_\phi(u_i) \to u_{i+1}$. It is locked to the training $\Delta t$ and chaining predictions causes error accumulation.
+    **AR Baseline** (red lane): learns a discrete step map $F_\phi(u_i) \to u_{i+1}$. Teacher forcing requires aligned $(u_i, u_{i+1})$ pairs at every step, so the training data must be uniformly spaced. A different $\Delta t$ means different state pairs, which requires a new model. Chaining predictions at inference causes error accumulation.
 
     | | CFO | AR-full | AR-equal |
     |---|---|---|---|
     | Training target | spline derivative $\partial_t s(t)$ | next state $u_{i+1}$ | next state $u_{i+1}$ |
     | Data used | sparse, irregular | 100 % uniform | same sparse pairs as CFO |
     | Inference | any $\Delta t$ via RK4 | fixed $\Delta t$, chained | fixed $\Delta t$, chained |
+
+    *AR-equal is a control experiment: it uses the same sparse, irregular data as CFO but with a discrete step map, isolating whether CFO's advantage comes from its continuous formulation or simply from having less data.*
     """)
     return
 
@@ -532,7 +554,7 @@ def model_def_intro(mo):
 
     The next cell bundles everything needed for the experiments:
     - **Ground-truth Lorenz ODE**: the analytic right-hand side and an RK4 integrator.
-    - **Neural networks**: `TinyODENet` (CFO, learns a vector field with sinusoidal time embeddings) and `ARNet` (autoregressive baseline, learns a one-step residual).
+    - **Neural networks**: `TinyODENet` (CFO, learns a vector field with sinusoidal time embeddings) and `ARNet` (autoregressive baseline, maps state $\to$ next state directly).
     - **Utilities**: normalisation helpers, spline wrapper, and PyTorch-to-NumPy inference wrappers.
     """)
     return
@@ -544,6 +566,7 @@ def model_definition(nn, np, torch):
 
     # ── Lorenz ground truth ───────────────────────────────────────────────────
     _SIGMA, _RHO, _BETA = 10.0, 28.0, 8.0 / 3.0
+    _Z_SLICE = 25.0  # shared z-slice for parametric vector-field visualisations
 
     def lorenz_deriv(state):
         x, y, z = state
@@ -730,11 +753,17 @@ def model_definition(nn, np, torch):
     n_params_ode = sum(p.numel() for p in _n_ode.parameters())
     n_params_ar = sum(p.numel() for p in _n_ar.parameters())
 
+    # public exports (marimo treats _-prefixed names as cell-private)
+    SIGMA = _SIGMA
+    Z_SLICE = _Z_SLICE
+
     return (
         ARNet,
         QuinticHermiteSpline,
         TinyODENet,
         TinyODENetParam,
+        Z_SLICE,
+        SIGMA,
         ar_rollout,
         compute_normalization,
         generate_lorenz,
@@ -1054,7 +1083,7 @@ def error_over_time_intro(mo):
     mo.md(r"""
     ### Error Curves with Variance
 
-    The training plot above showed the learning curves. The plot below repeats the test evaluation over **15 fresh trajectories** to show mean RMSE plus/minus one standard deviation. This gives a clearer picture of how prediction error grows as a function of rollout length.
+    The training plot above showed the learning curves. The plot below repeats the test evaluation over **15 fresh trajectories** to show mean RMSE plus/minus one standard deviation. This gives a clearer picture of how prediction error grows as a function of rollout length. Look for where the AR-full curve diverges from CFO. That divergence marks the horizon beyond which autoregressive error accumulation dominates.
     """)
     return
 
@@ -1115,9 +1144,11 @@ def error_over_time(
     _t_ax = np.arange(_H + 1)
 
     fig_err, ax_err = plt.subplots(figsize=(12, 4))
+    # On a log scale mean-std can go negative. Use a relative floor (20 % of mean)
+    # so bands do not crash to the axis bottom and create visual spikes.
     ax_err.plot(_t_ax, _cfo_m, color="#7799ff", lw=2, label=f"CFO ({_kr} % data)")
     ax_err.fill_between(
-        _t_ax, _cfo_m - _cfo_s, _cfo_m + _cfo_s, color="#7799ff", alpha=0.2
+        _t_ax, np.maximum(_cfo_m - _cfo_s, _cfo_m * 0.2), _cfo_m + _cfo_s, color="#7799ff", alpha=0.2
     )
     ax_err.plot(
         _t_ax,
@@ -1127,7 +1158,9 @@ def error_over_time(
         linestyle="--",
         label="AR-full (100 % data)",
     )
-    ax_err.fill_between(_t_ax, _ar_m - _ar_s, _ar_m + _ar_s, color="#ff8844", alpha=0.2)
+    ax_err.fill_between(
+        _t_ax, np.maximum(_ar_m - _ar_s, _ar_m * 0.2), _ar_m + _ar_s, color="#ff8844", alpha=0.2
+    )
     ax_err.plot(
         _t_ax,
         _areq_m,
@@ -1137,7 +1170,7 @@ def error_over_time(
         label=f"AR-equal ({_kr} % data)",
     )
     ax_err.fill_between(
-        _t_ax, _areq_m - _areq_s, _areq_m + _areq_s, color="#44dd88", alpha=0.2
+        _t_ax, np.maximum(_areq_m - _areq_s, _areq_m * 0.2), _areq_m + _areq_s, color="#44dd88", alpha=0.2
     )
     ax_err.set_title(
         f"Prediction RMSE over Steps  ·  averaged over {_N_EVAL} test trajectories",
@@ -1172,8 +1205,9 @@ def sweep_intro(mo):
     mo.md(r"""
     ## Temporal Generalisation: One Model, Any Resolution
 
-    CFO learns a continuous vector field that can be queried at **any step size** without
-    retraining. AR is locked to its training $\Delta t$: a different resolution requires
+    CFO learns $\frac{du}{dt} = N_\theta(t, u)$, a function of time and state rather than a discrete step.
+    At inference, any $\Delta t$ is valid because the model outputs a velocity, not a next-state
+    prediction. AR is locked to its training $\Delta t$: a different resolution requires
     a new model.
 
     **Drag the slider** to vary the evaluation resolution using the single CFO model
@@ -1248,9 +1282,9 @@ def continuous_resolution_demo(
     axes_res[0].plot(
         _gt_fine[:, 0],
         _gt_fine[:, 2],
-        color="#aaaaaa",
-        lw=0.6,
-        alpha=0.5,
+        color="#228866",
+        lw=1.4,
+        alpha=0.7,
         label="ground truth",
     )
     axes_res[0].plot(
@@ -1277,9 +1311,9 @@ def continuous_resolution_demo(
     axes_res[1].plot(
         _steps_gt,
         _gt_fine[:, 0],
-        color="#aaaaaa",
-        lw=0.6,
-        alpha=0.5,
+        color="#228866",
+        lw=1.4,
+        alpha=0.7,
         label="ground truth",
     )
     axes_res[1].plot(
@@ -1333,9 +1367,12 @@ def parametric_intro(mo):
     of attractors at once. At inference, setting $\rho$ yields a continuous vector field for
     that attractor without retraining.
 
-    This is not in the original paper. It is the notebook's primary novel contribution.
-    The model conditions on normalised $\rho$ as an extra scalar input to the network, trained
-    jointly on trajectories sampled from $\rho \in \{25, 28, 32, 35, 38\}$.
+    This is Not in the original paper. It is the notebook's primary novel contribution.
+    The model conditions on normalised $\rho$ as an extra input feature, concatenated alongside
+    the sinusoidal time embedding and state vector in the same MLP forward pass. The network learns
+    a parameterised family of vector fields in a single training run, using trajectories sampled
+    from $\rho \in \{25, 28, 32, 35, 38\}$. At inference it generalises to $\rho$ values outside
+    that range. The slider below lets you explore the full interval $[15, 50]$.
     """)
     return
 
@@ -1475,6 +1512,8 @@ def parametric_explore_controls(mo, param_cfo_model):
 
 @app.cell(hide_code=True)
 def vector_field_viz(
+    SIGMA,
+    Z_SLICE,
     generate_lorenz_param,
     make_cfo_param_fn,
     mo,
@@ -1497,9 +1536,8 @@ def vector_field_viz(
     _cfo_traj_n = rk4_ode(_cfo_p_fn, 0.0, _x0_n_vf, _dt_n_vf, 300)
     _cfo_traj_vf = _cfo_traj_n * _ss + _sm
 
-    # Grid for streamlines: x-y slice at z=25
-    # vy = x*(rho-25)-y depends on rho, so the field visually changes with the slider
-    _Z_SLICE = 25.0
+    # Grid for streamlines: x-y slice at fixed z
+    # vy = x*(rho-z)-y depends on rho, so the field visually changes with the slider
     _ng = 20
     _xs = np.linspace(-20, 20, _ng)
     _ys = np.linspace(-30, 30, _ng)
@@ -1508,14 +1546,13 @@ def vector_field_viz(
     _VV = np.zeros_like(_XX)
     _UU_c = np.zeros_like(_XX)
     _VV_c = np.zeros_like(_XX)
-    _sigma = 10.0
 
     for _i_g in range(_ng):
         for _j_g in range(_ng):
             _x, _y = _XX[_i_g, _j_g], _YY[_i_g, _j_g]
-            _UU[_i_g, _j_g] = _sigma * (_y - _x)
-            _VV[_i_g, _j_g] = _x * (_rho - _Z_SLICE) - _y
-            _u_p = np.array([_x, _y, _Z_SLICE])
+            _UU[_i_g, _j_g] = SIGMA * (_y - _x)
+            _VV[_i_g, _j_g] = _x * (_rho - Z_SLICE) - _y
+            _u_p = np.array([_x, _y, Z_SLICE])
             _u_n_g = ((_u_p - _sm) / _ss).astype(np.float32)
             _v_n_g = _cfo_p_fn(0.5, _u_n_g)
             _v_p_g = _v_n_g * _ss / _T_MAX_p
@@ -1524,7 +1561,7 @@ def vector_field_viz(
 
     fig_vf2, axes_vf2 = plt.subplots(1, 2, figsize=(12, 5))
     fig_vf2.suptitle(
-        f"Parametric CFO: ρ = {_rho:.1f}  (x-y slice at z = {_Z_SLICE:.0f})",
+        f"Parametric CFO: ρ = {_rho:.1f}  (x-y slice at z = {Z_SLICE:.0f})",
         color="#222222",
         fontsize=11,
     )
@@ -1542,9 +1579,9 @@ def vector_field_viz(
     axes_vf2[0].plot(
         _gt_vf[:, 0],
         _gt_vf[:, 1],
-        color="#333333",
-        lw=1.5,
-        alpha=0.8,
+        color="#228866",
+        lw=1.4,
+        alpha=0.7,
         label="True traj",
     )
     axes_vf2[0].set_xlabel("x")
@@ -1575,9 +1612,9 @@ def vector_field_viz(
     axes_vf2[1].plot(
         _gt_vf[:, 0],
         _gt_vf[:, 1],
-        color="#aaaaaa",
-        lw=0.8,
-        alpha=0.5,
+        color="#228866",
+        lw=1.2,
+        alpha=0.7,
         label="True traj",
     )
     axes_vf2[1].set_xlabel("x")
@@ -1606,6 +1643,7 @@ def click_intro(mo):
 
 @app.cell(hide_code=True)
 def field_click_panel(
+    Z_SLICE,
     go,
     mo,
     np,
@@ -1617,8 +1655,7 @@ def field_click_panel(
     _rho = rho_slider.value
     _rho_n = float((_rho - _RHO_M) / _RHO_S)
 
-    # x-y plane at z=25: vy = x*(rho-25)-y, so speed changes visually with rho
-    _Z_SLICE = 25.0
+    # x-y plane at fixed z: vy = x*(rho-z)-y, so speed changes visually with rho
     _ng = 30
     _xs_g = np.linspace(-22, 22, _ng)
     _ys_g = np.linspace(-30, 30, _ng)
@@ -1629,7 +1666,7 @@ def field_click_panel(
 
     with _torch.no_grad():
         for _i in range(_ng):
-            _u_row = np.stack([_XX_g[_i], _YY_g[_i], np.full(_ng, _Z_SLICE)], axis=1)
+            _u_row = np.stack([_XX_g[_i], _YY_g[_i], np.full(_ng, Z_SLICE)], axis=1)
             _u_n_row = ((_u_row - _sm) / _ss).astype(np.float32)
             _t_row = _torch.tensor([0.5] * _ng, dtype=_torch.float32)
             _u_t_row = _torch.tensor(_u_n_row)
@@ -1650,7 +1687,7 @@ def field_click_panel(
         )
     )
     _fig_click.update_layout(
-        title=f"Click to launch trajectory (ρ = {_rho:.1f}, z fixed at {_Z_SLICE:.0f})",
+        title=f"Click to launch trajectory (ρ = {_rho:.1f}, z fixed at {Z_SLICE:.0f})",
         xaxis_title="x",
         yaxis_title="y",
         width=600,
@@ -1658,19 +1695,13 @@ def field_click_panel(
         margin=dict(l=50, r=20, t=50, b=50),
     )
     field_click = mo.ui.plotly(_fig_click)
-    mo.vstack(
-        [
-            mo.md(
-                f"**Click anywhere on the heatmap** to set an initial condition (x, y) with z = {_Z_SLICE:.0f} fixed. The trajectory appears below."
-            ),
-            field_click,
-        ]
-    )
+    field_click
     return (field_click,)
 
 
 @app.cell(hide_code=True)
 def click_trajectory(
+    Z_SLICE,
     field_click,
     generate_lorenz_param,
     make_cfo_param_fn,
@@ -1684,12 +1715,17 @@ def click_trajectory(
 ):
     _clicked = field_click.value
     if not _clicked:
-        mo.stop(True, mo.md("Click on the heatmap above to launch a trajectory."))
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md("Click on the heatmap above to launch a trajectory."),
+                kind="neutral",
+            ),
+        )
     _pt = _clicked[0]
     _x0_click = float(_pt["x"])
     _y0_click = float(_pt["y"])
-    _Z_SLICE = 25.0
-    _ic_click = np.array([_x0_click, _y0_click, _Z_SLICE])
+    _ic_click = np.array([_x0_click, _y0_click, Z_SLICE])
 
     _sm, _ss, _T_MAX_p, _DT_p, _du_m, _du_s, _RHO_M, _RHO_S = param_norm_stats
     _rho = rho_slider.value
@@ -1704,12 +1740,12 @@ def click_trajectory(
 
     fig_click_traj, axes_ct = plt.subplots(1, 2, figsize=(11, 4))
     fig_click_traj.suptitle(
-        f"Trajectory from IC: x={_x0_click:.1f}, y={_y0_click:.1f}, z={_Z_SLICE:.0f}  |  ρ={_rho:.1f}",
+        f"Trajectory from IC: x={_x0_click:.1f}, y={_y0_click:.1f}, z={Z_SLICE:.0f}  |  ρ={_rho:.1f}",
         color="#222222",
         fontsize=10,
     )
     axes_ct[0].plot(
-        _gt_click[:, 0], _gt_click[:, 2], color="#333333", lw=1.5, label="True"
+        _gt_click[:, 0], _gt_click[:, 2], color="#228866", lw=1.4, alpha=0.7, label="True"
     )
     axes_ct[0].plot(
         _cfo_click[:, 0],
@@ -1719,13 +1755,13 @@ def click_trajectory(
         linestyle="--",
         label="Param CFO",
     )
-    axes_ct[0].scatter([_x0_click], [_Z_SLICE], color="red", zorder=5, s=60, label="IC")
+    axes_ct[0].scatter([_x0_click], [Z_SLICE], color="red", zorder=5, s=60, label="IC")
     axes_ct[0].set_xlabel("x")
     axes_ct[0].set_ylabel("z")
     axes_ct[0].set_title("Phase portrait (x-z)", color="#333333")
     axes_ct[0].legend(fontsize=8)
     _steps_ct = np.arange(301)
-    axes_ct[1].plot(_steps_ct, _gt_click[:, 0], color="#333333", lw=1.5, label="True x")
+    axes_ct[1].plot(_steps_ct, _gt_click[:, 0], color="#228866", lw=1.4, alpha=0.7, label="True x")
     axes_ct[1].plot(
         _steps_ct,
         _cfo_click[:, 0],
@@ -1754,9 +1790,8 @@ def takeaways(mo):
     |---|---|---|
     | 1 | CFO reproduces the paper's core Lorenz advantage: strong performance from **sparse, irregular** observations against AR baselines | Reproduction |
     | 2 | CFO learns a continuous vector field that is **resolution-agnostic**: query at any step size without retraining | Reproduction + demo |
-    | 3 | **Parametric CFO** conditions on Lorenz $\\rho$, learning the entire family of attractors with one model | Novel |
+    | 3 | **Parametric CFO** conditions on Lorenz $\rho$, learning the entire family of attractors with one model | Novel |
     | 4 | The clickable vector field lets you launch trajectories from any initial condition across the attractor family | Novel demo |
-    | 5 | Attractor recovery is supporting evidence: better local dynamics lead to better global geometry | Supporting evidence |
 
     ---
 
