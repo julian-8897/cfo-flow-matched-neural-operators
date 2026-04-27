@@ -29,7 +29,7 @@ Run the notebook interactively without installing anything:
 ```bash
 # Clone the repository
 git clone <repo-url>
-cd molab-competition
+cd cfo-flow-matched-neural-operators
 
 # Install dependencies (uv recommended)
 uv sync
