@@ -1,81 +1,82 @@
-# CFO: Continuous Vector Fields from Sparse Lorenz Data
+# Parametric Flow Operators: Learning Families of Chaotic Attractors
 
-[![marimo demo](https://img.shields.io/badge/marimo-demo-blue)](https://molab.marimo.io/notebooks/nb_KjqXxSQBsdQUwggJE6qDh3)
+[![marimo demo](https://img.shields.io/badge/marimo-Live%20Demo-blue?style=for-the-badge&logo=marimo)](https://molab.marimo.io/notebooks/nb_KjqXxSQBsdQUwggJE6qDh3)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-An interactive marimo notebook reproducing the CFO (Continuous Flow Operator) paper on the Lorenz attractor, with a novel parametric extension that learns an entire family of attractors conditioned on the Lorenz parameter.
+> Autoregressive models break when you change the time resolution or when you have sparse observations.
+> **Continuous Flow Operators (CFO)** solve this by learning the underlying velocity field of a dynamical system
+> instead of a discrete step-map, making them resolution-agnostic and robust to sparse, irregular data.
 
-**Paper**: Hou, Huang & Perdikaris, 2025 — [alphaxiv:2512.05297](https://alphaxiv.org/abs/2512.05297)
-**Competition**: alphaXiv · marimo notebook competition
+This project **reproduces the CFO paper** ([Hou, Huang & Perdikaris, 2025](https://alphaxiv.org/abs/2512.05297)) on
+the Lorenz attractor, then **extends it** with a novel *Parametric CFO* that learns an entire **family** of attractors
+conditioned on system parameters — all from a single model, with no retraining required.
 
-## Live Demo
+*Built for the [alphaXiv x marimo molab notebook competition](https://marimo.io/pages/events/notebook-competition), 2026.*
 
-Run the notebook interactively without installing anything:
+---
 
-**[Open in marimo](https://molab.marimo.io/notebooks/nb_KjqXxSQBsdQUwggJE6qDh3)**
+## Novel Contribution: Parametric CFO
 
-## What This Notebook Shows
+Standard CFO trains one model per fixed system. Here, the network is conditioned on the Lorenz
+parameter **ρ**, enabling a *single model* to represent the full family of attractors for **ρ ∈ [15, 50]**.
 
-### Reproduction
-1. **CFO's core advantage**: A continuous-time neural operator trained on sparse, irregular observations outperforms autoregressive baselines that require uniform spacing.
-2. **Resolution-agnostic inference**: Because CFO learns a velocity field, it can be queried at any step size without retraining. AR models are locked to their training delta.
-3. **Spline-based flow matching**: Quintic Hermite splines provide analytic derivative targets, eliminating the need to differentiate through an ODE solver during training.
+**Capabilities at inference time:**
+- Generalise to **unseen ρ values without retraining**, achieving trajectory accuracy comparable to
+  individually-trained fixed-ρ models across the full parameter interval
+- Generate a continuous vector field for any specific system configuration on demand
+- Explore trajectories interactively — launch from arbitrary initial conditions via a live heatmap
 
-### Novel Extension
-4. **Parametric CFO**: A single model conditioned on the Lorenz parameter rho learns the entire attractor family at once. At inference, setting rho yields a continuous vector field for that attractor without retraining.
-5. **Interactive exploration**: Click anywhere on the parametric vector field heatmap to launch trajectories from arbitrary initial conditions.
+> **[Try it live in the browser →](https://molab.marimo.io/notebooks/nb_KjqXxSQBsdQUwggJE6qDh3)**
+>
+> *Features: real-time resolution adjustment, trajectory launching, and parametric family exploration.*
 
-## Running Locally
+---
+
+## Research Reproduction: CFO vs. Autoregressive Models
+
+The core thesis of [Hou, Huang & Perdikaris, 2025](https://alphaxiv.org/abs/2512.05297) is that
+learning a velocity field rather than a step-map unlocks three properties that AR models cannot match:
+
+1. **Sparse & Irregular Data** — By fitting the underlying ODE field, CFO remains accurate even with
+   aggressive data subsampling where AR models diverge.
+2. **Resolution-Agnostic Inference** — The model can be queried at any Δt during inference; standard
+   AR models are locked to the training resolution.
+3. **Efficient Training** — Quintic Hermite splines provide analytic derivative targets, enabling flow
+   matching without differentiating through expensive ODE solvers.
+
+---
+
+## Tech Stack
+
+| Tool | Role |
+|---|---|
+| [marimo](https://marimo.io/) | Reactive Python notebooks & interactive UI |
+| [PyTorch](https://pytorch.org/) | Neural operator training |
+| NumPy / SciPy | Spline fitting & numerical integration |
+| Plotly / Matplotlib | Visualization |
+| [uv](https://github.com/astral-sh/uv) | Dependency management & reproducible environments |
+
+---
+
+## Local Installation
 
 ```bash
 # Clone the repository
-git clone <repo-url>
-cd cfo-flow-matched-neural-operators
+git clone https://github.com/julian-8897/molab-competition.git
+cd molab-competition
 
-# Install dependencies (uv recommended)
-uv sync
-
-# Run the notebook
-marimo run notebook.py
-
-# Or edit in the marimo IDE
-marimo edit notebook.py
+# Run the interactive notebook
+uv run marimo run notebook.py
 ```
 
-### Dependencies
+To explore or modify the source in the marimo IDE:
 
-- Python >= 3.11
-- marimo >= 0.10.0
-- torch >= 2.2.0 (CPU)
-- numpy >= 1.26.0
-- matplotlib >= 3.8.0
-- scipy >= 1.11.0
-- plotly >= 5.20.0
+```bash
+uv run marimo edit notebook.py
+```
 
-## Notebook Structure
-
-The notebook follows a pedagogical arc:
-
-1. **Theory** — Why autoregressive models fail on sparse/irregular data and how CFO reframes the problem as learning an ODE velocity field.
-2. **Mechanism** — Quintic spline interpolation provides flow-matching targets without ODE solver gradients.
-3. **Data Pipeline** — Visualise sparse observations, spline reconstruction, and derivative targets at variable keep rates.
-4. **Core Experiment** — Train three models simultaneously (CFO, AR-full, AR-equal) and compare RMSE over rollout horizons.
-5. **Temporal Generalisation** — Drag a slider to evaluate the same CFO model at arbitrary resolutions.
-6. **Parametric Extension** — Train one model on rho in {25, 28, 32, 35, 38}, then generalise across the full interval [15, 50].
-7. **Interactive Demo** — Click-to-launch trajectories on the learned parametric vector field.
-
-## Key Takeaways
-
-| # | What this notebook shows | Role |
-|---|---|---|
-| 1 | CFO reproduces strong performance from sparse, irregular observations against AR baselines | Reproduction |
-| 2 | CFO learns a continuous vector field that is resolution-agnostic | Reproduction + demo |
-| 3 | Parametric CFO conditions on Lorenz rho, learning the entire family of attractors with one model | Novel |
-| 4 | Clickable vector field lets you launch trajectories from any initial condition across the attractor family | Novel demo |
-
-## Limitations
-
-This notebook uses a toy setting (TinyODENet ~5 K params, 3-D Lorenz ODE) to faithfully reproduce the conceptual CFO advantages. The full paper scales to 1D/2D PDE benchmarks with U-Net/FNO operators (200 K–600 K parameters) and achieves up to 87% relative error reduction.
+---
 
 ## License
 
-MIT
+This project is licensed under the MIT License.
