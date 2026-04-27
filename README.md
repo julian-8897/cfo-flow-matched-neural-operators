@@ -35,9 +35,9 @@ parameter **ρ**, enabling a *single model* to represent the full family of attr
 ## Research Reproduction: CFO vs. Autoregressive Models
 
 The core thesis of [Hou, Huang & Perdikaris, 2025](https://alphaxiv.org/abs/2512.05297) is that
-learning a velocity field rather than a step-map unlocks three properties that AR models cannot match:
+learning a velocity field rather than a discrete step-map enables three properties that AR models cannot match:
 
-1. **Sparse & Irregular Data** — By fitting the underlying ODE field, CFO remains accurate even with
+1. **Sparse & Irregular Data** — By fitting the underlying vector field, CFO remains accurate even with
    aggressive data subsampling where AR models diverge.
 2. **Resolution-Agnostic Inference** — The model can be queried at any Δt during inference; standard
    AR models are locked to the training resolution.
