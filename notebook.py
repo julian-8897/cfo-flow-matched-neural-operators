@@ -12,8 +12,8 @@ def imports():
     import numpy as np
     import torch
     import torch.nn as nn
+    import plotly.graph_objects as go
     from matplotlib.collections import LineCollection
-    from scipy.interpolate import CubicSpline
 
     torch.manual_seed(42)
     np.random.seed(42)
@@ -36,26 +36,26 @@ def imports():
             "legend.edgecolor": "#cccccc",
         }
     )
-    return CubicSpline, LineCollection, mo, nn, np, plt, torch
+    return LineCollection, go, mo, nn, np, plt, torch
 
 
 @app.cell(hide_code=True)
 def title_cell(mo):
     mo.md(r"""
-    # Reproducing CFO on Lorenz, then Extending it with Physics-Informed Training
+    # Reproducing CFO on Lorenz, then Extending it with Parametric Conditioning
     ## *alphaXiv x marimo competition notebook*
 
     > **Paper**: Hou, Huang & Perdikaris, 2025 · [alphaxiv:2512.05297](https://alphaxiv.org/abs/2512.05297)
 
     ---
 
-    This notebook makes a two-part argument:
+    This notebook makes two arguments:
 
     1. **Reproduction**: CFO's continuous-time formulation is more data-efficient than
-       autoregressive next-step prediction on sparse Lorenz trajectories.
-    2. **Novel extension**: once the model learns a vector field rather than a step map,
-       we can regularize it directly against known physics. We implement that idea here
-       as **CFO-PI**.
+       autoregressive next-step prediction on sparse Lorenz trajectories. Because CFO
+       learns a vector field, it can be evaluated at any step size after a single training run.
+    2. **Novel extension**: a single model conditioned on $\rho$ learns the entire Lorenz
+       attractor family. Click any point on the vector field to launch a trajectory.
 
     Most learned dynamics surrogates use a **discrete step map** $F_\phi(u_i) \to u_{i+1}$.
     That makes them fragile over long rollouts and ties them to the training step size
@@ -64,17 +64,13 @@ def title_cell(mo):
     through the ODE solver. At inference, a numerical integrator evaluates the learned
     vector field at arbitrary query times.
 
-    | | Standard AR | **CFO / CFO-PI** |
+    | | Standard AR | **CFO** |
     |---|---|---|
     | Learns | step map $F_\phi$ | vector field $\mathcal{N}_\theta(t, u)$ |
-    | Handles irregular observations? | No — assumes fixed spacing | **Yes** |
-    | Long-rollout behavior | Errors accumulate under chaining | **Integrates a learned field** |
-    | Equation-level physics priors | No natural interface | **Directly regularizable** |
+    | Handles irregular observations? | No (assumes fixed spacing) | **Yes** |
+    | Resolution-agnostic inference? | No (locked to training $\Delta t$) | **Yes** |
+    | Parametric conditioning on $\rho$? | Not natural | **Yes (novel extension)** |
     | Competition role | reproduction baseline | **reproduction + novel extension** |
-
-    > The paper reports large gains on Lorenz and several PDE benchmarks. This notebook
-    > focuses on the Lorenz setting, then extends the method with a physics-informed variant
-    > the paper motivates but does not instantiate here.
     """)
     return
 
@@ -87,7 +83,7 @@ def cfo_explainer(mo):
     ### The autoregressive issue
 
     A standard next-step model learns $\hat{u}_{i+1} = F_\phi(u_i)$.
-    Chaining these steps at inference causes errors to compound — and the model is
+    Chaining these steps at inference causes errors to compound. The model is
     structurally tied to the fixed $\Delta t$ it was trained on.
 
     ### CFO's key insight
@@ -101,15 +97,14 @@ def cfo_explainer(mo):
 
     ### The spline trick
 
-    Given sparse, irregular snapshots $\{(t_i, u_i)\}$, fit a **cubic spline** $s(t)$.
+    Given sparse, irregular snapshots $\{(t_i, u_i)\}$, fit a **quintic spline** $s(t)$.
     Its analytic derivative $\partial_t s(t)$ serves as the velocity target, giving the
     flow-matching loss:
 
     $$\mathcal{L}(\theta) = \mathbb{E}_{t,\,\mathbf{u}}\bigl[\|\mathcal{N}_\theta(t,\, s(t;\mathbf{u})) - \partial_t s(t;\mathbf{u})\|^2\bigr]$$
 
     No ODE solver enters the backward pass, only cheap spline evaluations. That is what
-    makes CFO practical on sparse, irregular data, and it is also what makes the later
-    physics-informed extension clean to add.
+    makes CFO practical on sparse, irregular data.
     """)
     return
 
@@ -138,7 +133,7 @@ def lorenz_viz(LineCollection, mo, np, plt):
     for _i in range(_n):
         _traj[_i + 1] = _rk4(_lorenz, _traj[_i], _dt)
 
-    _times_viz = np.arange(_n + 1) * _dt
+    _times_viz = np.arange(_n + 1)
 
     fig_lorenz, axes_lorenz = plt.subplots(1, 3, figsize=(14, 4.2))
     fig_lorenz.suptitle(
@@ -150,12 +145,12 @@ def lorenz_viz(LineCollection, mo, np, plt):
 
     axes_lorenz[0].plot(_times_viz, _traj[:, 0], color="#7799ff", lw=0.6)
     axes_lorenz[0].set_title("x(t)", color="#333333")
-    axes_lorenz[0].set_xlabel("time (s)")
+    axes_lorenz[0].set_xlabel("step")
     axes_lorenz[0].set_ylabel("x")
 
     axes_lorenz[1].plot(_times_viz, _traj[:, 2], color="#ff8844", lw=0.6)
     axes_lorenz[1].set_title("z(t)", color="#333333")
-    axes_lorenz[1].set_xlabel("time (s)")
+    axes_lorenz[1].set_xlabel("step")
     axes_lorenz[1].set_ylabel("z")
 
     _pts_lc = np.array([_traj[:, 0], _traj[:, 2]]).T.reshape(-1, 1, 2)
@@ -185,7 +180,7 @@ def data_controls(mo):
         stop=100,
         step=5,
         value=50,
-        label="Keep rate — % of time points per trajectory (CFO training data)",
+        label="Keep rate: % of time points per trajectory (CFO training data)",
     )
     n_traj_slider = mo.ui.slider(
         start=5,
@@ -217,7 +212,7 @@ def data_controls(mo):
 
 
 @app.cell(hide_code=True)
-def data_spline_viz(CubicSpline, keep_rate_slider, mo, np, plt):
+def data_spline_viz(QuinticHermiteSpline, keep_rate_slider, mo, np, plt):
     """Visualize full trajectory vs sparse samples vs cubic spline reconstruction."""
     _sigma, _rho, _beta = 10.0, 28.0, 8.0 / 3.0
 
@@ -250,7 +245,7 @@ def data_spline_viz(CubicSpline, keep_rate_slider, mo, np, plt):
     _u_sub = _traj_full[_idx_sub]
 
     # Fit spline
-    _cs = CubicSpline(_t_sub, _u_sub)
+    _cs = QuinticHermiteSpline(_t_sub, _u_sub)
     _t_fine = np.linspace(_t_sub[0], _t_sub[-1], 400)
     _u_recon = _cs(_t_fine)
     _du_recon = _cs(_t_fine, 1)
@@ -290,12 +285,12 @@ def data_spline_viz(CubicSpline, keep_rate_slider, mo, np, plt):
         alpha=0.9,
         label="cubic spline",
     )
-    _ax0.set_title("x(t) — state reconstruction", color="#333333")
+    _ax0.set_title("x(t): state reconstruction", color="#333333")
     _ax0.set_xlabel("time (s)")
     _ax0.set_ylabel("x")
     _ax0.legend(fontsize=8)
 
-    # Right: dx/dt derivative — the CFO training target
+    # Right: dx/dt derivative, the CFO training target
     _ax1 = axes_spline[1]
     _true_du_x = np.array([_lorenz_d(_traj_full[_j])[0] for _j in range(len(_t_full))])
     _ax1.plot(
@@ -310,7 +305,7 @@ def data_spline_viz(CubicSpline, keep_rate_slider, mo, np, plt):
         alpha=0.9,
         label="spline dx/dt  ← CFO training target",
     )
-    _ax1.set_title("dx/dt — spline derivative  ← CFO training target", color="#333333")
+    _ax1.set_title("dx/dt: spline derivative (CFO training target)", color="#333333")
     _ax1.set_xlabel("time (s)")
     _ax1.set_ylabel("dx/dt")
     _ax1.legend(fontsize=8)
@@ -323,8 +318,8 @@ def data_spline_viz(CubicSpline, keep_rate_slider, mo, np, plt):
             _spline_out,
             mo.callout(
                 mo.md(
-                    "**Left** — sparse observations (dots) and cubic spline reconstruction (white dashed). "
-                    "**Right** — the spline's analytic derivative is the flow-matching target that CFO trains on. "
+                    "**Left**: sparse observations (dots) and quintic spline reconstruction (white dashed). "
+                    "**Right**: the spline's analytic derivative is the flow-matching target that CFO trains on. "
                     "No ODE solver needed: spline derivatives are free. Even at low keep rates the velocity "
                     "field is well approximated."
                 ),
@@ -336,8 +331,8 @@ def data_spline_viz(CubicSpline, keep_rate_slider, mo, np, plt):
 
 
 @app.cell(hide_code=True)
-def data_efficiency_viz(CubicSpline, generate_lorenz, mo, np, plt):
-    """Spline reconstruction quality vs keep rate — no retraining needed."""
+def data_efficiency_viz(QuinticHermiteSpline, generate_lorenz, mo, np, plt):
+    """Spline reconstruction quality vs keep rate. No retraining needed."""
     _DT = 0.025
     _N_STEPS = 160
     _T_MAX = _N_STEPS * _DT
@@ -364,10 +359,10 @@ def data_efficiency_viz(CubicSpline, generate_lorenz, mo, np, plt):
         _idx = np.sort(_rng_eff.choice(_N_STEPS + 1, _n_keep, replace=False))
         _t_sub = _t_full[_idx]
         _u_sub = _traj_full[_idx]
-        _cs = CubicSpline(_t_sub, _u_sub)
+        _cs = QuinticHermiteSpline(_t_sub, _u_sub)
         _u_recon = _cs(_t_fine)
 
-        _cs_true = CubicSpline(_t_full, _traj_full)
+        _cs_true = QuinticHermiteSpline(_t_full, _traj_full)
         _u_true_fine = _cs_true(_t_fine)
         _rmse = float(np.sqrt(np.mean((_u_recon - _u_true_fine) ** 2)))
         _rmse_list.append(_rmse)
@@ -415,8 +410,8 @@ def algorithm_cell(mo):
     mo.md(r"""
     ## Algorithms and Baselines
 
-    The notebook first reproduces CFO against two autoregressive baselines, then fine-tunes
-    CFO into a physics-informed variant.
+    The notebook reproduces CFO against two autoregressive baselines, then adds a novel
+    parametric extension conditioned on the Lorenz $\rho$ parameter.
 
     **CFO Training**
     ```
@@ -425,23 +420,14 @@ def algorithm_cell(mo):
     Preprocessing (once per trajectory):
         subsample(T_n, U_n, keep_rate)  →  irregular grid (t̃, ũ)
         normalize ũ to zero-mean unit-variance
-        fit CubicSpline s(t) to (t̃_norm, ũ_norm)
+        fit QuinticHermiteSpline s(t) to (t̃_norm, ũ_norm)
 
     While not converged:
         sample t ~ Uniform[0, 1]
-        u   ←  s(t)           # spline value (no ODE solver!)
-        du  ←  s'(t)          # analytic derivative — cubic gives smoother targets
+        u   ←  s(t)    # spline value (no ODE solver!)
+        du  ←  s'(t)   # analytic derivative
         L(θ) = ‖N_θ(t, u) − du‖²
         update θ via Adam
-    ```
-
-    **CFO-PI Fine-Tuning**
-    ```
-    Start from the trained CFO weights
-    Sample physical states u and query times t
-    Compute true physics velocity f(u)
-    Add equation-level penalty:
-        L_PI(θ) = L_flow(θ) + λ ‖N_θ(t, u) − f(u)‖²
     ```
 
     **CFO Inference (RK4)**
@@ -455,17 +441,17 @@ def algorithm_cell(mo):
         uᵢ₊₁ = uᵢ + h/6·(k₁ + 2k₂ + 2k₃ + k₄)
     ```
 
-    **AR-full Baseline (always trained on 100 % uniform data — paper's hard baseline)**
+    **AR-full Baseline (always trained on 100 % uniform data, paper's hard baseline)**
     ```
     Train:   F_φ(uᵢ) ≈ uᵢ₊₁   (one-step, teacher forcing, fixed Δt, 100 % data)
     Infer:   û₀ → û₁ → û₂ → …  (chains predictions, errors accumulate)
     ```
 
-    **AR-equal Baseline (trained on same sparse data as CFO — fair equal-data comparison)**
+    **AR-equal Baseline (trained on same sparse data as CFO, equal-data comparison)**
     ```
     Train:   F_φ(uᵢ) ≈ uᵢ₊₁   (consecutive kept pairs only, irregular Δt ignored)
     Infer:   û₀ → û₁ → û₂ → …  (same rollout, but learned from fewer pairs)
-    Note:    AR cannot use time as input — it sees state→state with no Δt conditioning
+    Note:    AR cannot use time as input; it sees state→state with no Δt conditioning
     ```
     """)
     return
@@ -594,6 +580,59 @@ def model_definition(nn, np, torch):
         std = all_u.std(axis=0) + 1e-8
         return mean, std
 
+    class QuinticHermiteSpline:
+        """Quintic B-spline interpolant (k=5) with analytic derivative support."""
+        def __init__(self, t, u):
+            from scipy.interpolate import make_interp_spline
+            self._spl = make_interp_spline(t, u, k=5)
+
+        def __call__(self, t_new, deriv=0):
+            return self._spl(t_new, deriv)
+
+    def generate_lorenz_param(x0, n_steps, rho, dt=0.025):
+        _sigma, _beta = 10.0, 8.0 / 3.0
+        def _lp(state):
+            x, y, z = state
+            return np.array([_sigma * (y - x), x * (rho - z) - y, x * y - _beta * z])
+        traj = np.zeros((n_steps + 1, 3))
+        traj[0] = x0
+        for i in range(n_steps):
+            traj[i + 1] = rk4_np(_lp, traj[i], dt)
+        return np.arange(n_steps + 1) * dt, traj
+
+    class TinyODENetParam(nn.Module):
+        """CFO backbone conditioned on a scalar parameter (rho)."""
+        def __init__(self, state_dim=3, hidden=128, n_freq=4):
+            super().__init__()
+            self.n_freq = n_freq
+            in_dim = state_dim + 2 * n_freq + 1
+            self.net = nn.Sequential(
+                nn.Linear(in_dim, hidden), nn.Tanh(),
+                nn.Linear(hidden, hidden), nn.Tanh(),
+                nn.Linear(hidden, hidden), nn.Tanh(),
+                nn.Linear(hidden, state_dim),
+            )
+
+        def _time_embed(self, t):
+            freqs = torch.tensor([2 ** i * np.pi for i in range(self.n_freq)], dtype=torch.float32)
+            t = t.reshape(-1, 1)
+            return torch.cat([torch.sin(t * freqs), torch.cos(t * freqs)], dim=-1)
+
+        def forward(self, t, u, rho_norm):
+            return self.net(torch.cat([u, self._time_embed(t), rho_norm], dim=-1))
+
+    @torch.no_grad()
+    def make_cfo_param_fn(ode_net_param, rho_norm_scalar, du_mean=None, du_std=None):
+        def fn(t_scalar, u_np):
+            t_t = torch.tensor([float(t_scalar)], dtype=torch.float32)
+            u_t = torch.tensor(u_np, dtype=torch.float32).unsqueeze(0)
+            rho_t = torch.tensor([[float(rho_norm_scalar)]], dtype=torch.float32)
+            pred = ode_net_param(t_t, u_t, rho_t).detach().numpy()[0]
+            if du_std is not None:
+                pred = pred * du_std + (du_mean if du_mean is not None else 0.0)
+            return pred
+        return fn
+
     _n_ode = TinyODENet()
     _n_ar = ARNet()
     n_params_ode = sum(p.numel() for p in _n_ode.parameters())
@@ -601,12 +640,16 @@ def model_definition(nn, np, torch):
 
     return (
         ARNet,
+        QuinticHermiteSpline,
         TinyODENet,
+        TinyODENetParam,
         ar_rollout,
         compute_normalization,
         generate_lorenz,
+        generate_lorenz_param,
         lorenz_deriv,
         make_cfo_fn,
+        make_cfo_param_fn,
         n_params_ar,
         n_params_ode,
         rk4_np,
@@ -619,19 +662,17 @@ def training_controls(mo, n_params_ode, n_params_ar):
     train_epochs = mo.ui.slider(
         start=50, stop=300, step=25, value=150, label="Training epochs"
     )
-    train_btn = mo.ui.run_button(label="▶ Train Four Models")
+    train_btn = mo.ui.run_button(label="▶ Train Three Models")
     mo.vstack(
         [
             mo.md(
                 "## Core Experiment\n\n"
-                "This cell performs the main competition comparison: first the paper reproduction, then the "
-                "novel physics-informed extension. It trains four models simultaneously:\n"
-                "- **CFO** (TinyODENet) — cubic spline derivative targets, sparse data\n"
-                "- **CFO-PI** (TinyODENet) — warm-start from CFO + equation-level physics regularization\n"
-                "- **AR-full** (ARNet) on 100 % uniform data — paper's hard baseline\n"
-                "- **AR-equal** (ARNet) on the same sparse kept pairs as CFO — fair equal-data comparison\n\n"
+                "**Three models trained simultaneously:**\n"
+                "- **CFO** (TinyODENet): quintic spline derivative targets, sparse data\n"
+                "- **AR-full** (ARNet): 100% uniform data, paper's hard baseline\n"
+                "- **AR-equal** (ARNet): same sparse kept pairs as CFO, equal-data comparison\n\n"
                 f"TinyODENet: **{n_params_ode:,} parameters** (sinusoidal time encoding) · "
-                f"ARNet: **{n_params_ar:,} parameters** — both CPU-friendly."
+                f"ARNet: **{n_params_ar:,} parameters**."
             ),
             mo.hstack([train_epochs, train_btn]),
         ]
@@ -642,14 +683,13 @@ def training_controls(mo, n_params_ode, n_params_ar):
 @app.cell(hide_code=True)
 def run_training(
     ARNet,
-    CubicSpline,
+    QuinticHermiteSpline,
     TinyODENet,
     ar_rollout,
     compute_normalization,
     generate_lorenz,
     horizon_slider,
     keep_rate_slider,
-    lorenz_deriv,
     make_cfo_fn,
     mo,
     n_traj_slider,
@@ -672,7 +712,7 @@ def run_training(
             True,
             mo.callout(
                 mo.md(
-                    "Click **▶ Train Four Models** to train CFO, CFO-PI, AR-full, and AR-equal."
+                    "Click **▶ Train Three Models** to train CFO, AR-full, and AR-equal."
                 ),
                 kind="neutral",
             ),
@@ -714,7 +754,7 @@ def run_training(
         _kept_idx_list.append(_idx)
         _t_sub = _times_raw[_idx] / _T_MAX
         _u_sub = (_traj_raw[_idx] - _state_mean) / _state_std
-        _cs = CubicSpline(_t_sub, _u_sub)
+        _cs = QuinticHermiteSpline(_t_sub, _u_sub)
         _t_smp = _rng2.uniform(_t_sub[0], _t_sub[-1], _N_SAMPLE_PER_TRAJ).astype(np.float32)
         _cfo_t_list.append(_t_smp)
         _cfo_u_list.append(_cs(_t_smp).astype(np.float32))
@@ -795,61 +835,24 @@ def run_training(
             _ep_loss += _loss.item(); _nb += 1
         _losses_areq.append(_ep_loss / max(_nb, 1))
 
-    # ── Train CFO-PI (physics-informed, warm-started from cfo_model) ─────────
-    cfo_pi_model = TinyODENet()
-    cfo_pi_model.load_state_dict(cfo_model.state_dict())
-    _opt_pi = torch.optim.Adam(cfo_pi_model.parameters(), lr=_LR * 0.5)
-    _LAMBDA_PI = 0.5
-    _N_PHYS = 256
-    _all_u_phys = np.concatenate([t for _, t in _train_trajs], axis=0)
-    _rng_pi = np.random.default_rng(42)
-    _losses_pi = []
-    for _ in range(_EPOCHS):
-        _idx_p = _rng_pi.integers(0, len(_all_u_phys), _N_PHYS)
-        _u_ph = _all_u_phys[_idx_p]
-        _u_n_ph = ((_u_ph - _state_mean) / _state_std).astype(np.float32)
-        _v_ph = np.stack([lorenz_deriv(u) for u in _u_ph]).astype(np.float32)
-        _v_n = _v_ph / _state_std * _T_MAX
-        _v_tgt = ((_v_n - _du_mean) / _du_std).astype(np.float32)
-        _t_rand = torch.tensor(_rng_pi.uniform(0, 1, _N_PHYS).astype(np.float32))
-        _u_t_ph = torch.tensor(_u_n_ph)
-        _v_t = torch.tensor(_v_tgt)
-        _perm_pi = np.random.permutation(_N_CFO)
-        _ep_loss_pi = 0.0
-        _nb_pi = 0
-        for _i in range(0, _N_CFO, _BATCH):
-            _idx_b = _perm_pi[_i : _i + _BATCH]
-            _opt_pi.zero_grad()
-            _l_flow = torch.mean(
-                (cfo_pi_model(_T_cfo[_idx_b], _U_cfo[_idx_b]) - _DU_cfo[_idx_b]) ** 2
-            )
-            _l_phys = torch.mean((cfo_pi_model(_t_rand, _u_t_ph) - _v_t) ** 2)
-            (_l_flow + _LAMBDA_PI * _l_phys).backward()
-            _opt_pi.step()
-            _ep_loss_pi += _l_flow.item()
-            _nb_pi += 1
-        _losses_pi.append(_ep_loss_pi / max(_nb_pi, 1))
-
+    cfo_pi_model = None
     norm_stats = (_state_mean, _state_std, _T_MAX, _DT, _du_mean, _du_std)
 
     # ── Eval on test set ──────────────────────────────────────────────────────
     _H = horizon_slider.value
     _dt_n = _DT / _T_MAX
     _cfo_fn = make_cfo_fn(cfo_model, _du_mean, _du_std)
-    _cfo_pi_fn = make_cfo_fn(cfo_pi_model, _du_mean, _du_std)
-    _cfo_rmse_list, _cfo_pi_rmse_list, _ar_rmse_list, _areq_rmse_list = [], [], [], []
+    _cfo_rmse_list, _ar_rmse_list, _areq_rmse_list = [], [], []
 
     for _times_raw, _traj_raw in _test_trajs:
         _u_n = (_traj_raw - _state_mean) / _state_std
         _u0_n = _u_n[0]
         _true = _u_n[: _H + 1]
         _cfo_rmse_list.append(np.sqrt(np.mean((rk4_ode(_cfo_fn, 0.0, _u0_n, _dt_n, _H) - _true) ** 2, axis=1)))
-        _cfo_pi_rmse_list.append(np.sqrt(np.mean((rk4_ode(_cfo_pi_fn, 0.0, _u0_n, _dt_n, _H) - _true) ** 2, axis=1)))
         _ar_rmse_list.append(np.sqrt(np.mean((ar_rollout(ar_model, _u0_n, _H) - _true) ** 2, axis=1)))
         _areq_rmse_list.append(np.sqrt(np.mean((ar_rollout(ar_eq_model, _u0_n, _H) - _true) ** 2, axis=1)))
 
     _cfo_rmse_mean = np.mean(_cfo_rmse_list, axis=0)
-    _cfo_pi_rmse_mean = np.mean(_cfo_pi_rmse_list, axis=0)
     _ar_rmse_mean = np.mean(_ar_rmse_list, axis=0)
     _areq_rmse_mean = np.mean(_areq_rmse_list, axis=0)
 
@@ -858,22 +861,20 @@ def run_training(
     _fig, _axes = plt.subplots(1, 2, figsize=(13, 3.8))
 
     _axes[0].plot(_losses_cfo, color="#7799ff", lw=1.5, label=f"CFO ({_kr} %)")
-    _axes[0].plot(_losses_pi, color="#aa55ff", lw=1.5, label=f"CFO-PI ({_kr} %)", linestyle="-.")
     _axes[0].plot(_losses_ar, color="#ff8844", lw=1.5, label="AR-full (100 %)", linestyle="--")
     _axes[0].plot(_losses_areq, color="#44dd88", lw=1.5, label=f"AR-equal ({_kr} %)", linestyle=":")
-    _axes[0].set_title("Training Loss (flow-matching term)", color="#333333")
+    _axes[0].set_title("Training Loss", color="#333333")
     _axes[0].set_xlabel("epoch")
     _axes[0].set_ylabel("MSE (normalised space)")
     _axes[0].legend(fontsize=8)
     _axes[0].set_yscale("log")
 
-    _t_axis = np.arange(_H + 1) * _DT
-    _axes[1].plot(_t_axis, _cfo_rmse_mean, color="#7799ff", lw=2, label=f"CFO ({_kr} %)")
-    _axes[1].plot(_t_axis, _cfo_pi_rmse_mean, color="#aa55ff", lw=2, linestyle="-.", label=f"CFO-PI ({_kr} %)")
-    _axes[1].plot(_t_axis, _ar_rmse_mean, color="#ff8844", lw=2, linestyle="--", label="AR-full (100 %)")
-    _axes[1].plot(_t_axis, _areq_rmse_mean, color="#44dd88", lw=2, linestyle=":", label=f"AR-equal ({_kr} %)")
+    _step_axis = np.arange(_H + 1)
+    _axes[1].plot(_step_axis, _cfo_rmse_mean, color="#7799ff", lw=2, label=f"CFO ({_kr} %)")
+    _axes[1].plot(_step_axis, _ar_rmse_mean, color="#ff8844", lw=2, linestyle="--", label="AR-full (100 %)")
+    _axes[1].plot(_step_axis, _areq_rmse_mean, color="#44dd88", lw=2, linestyle=":", label=f"AR-equal ({_kr} %)")
     _axes[1].set_title("Test RMSE over horizon", color="#333333")
-    _axes[1].set_xlabel("time (s)")
+    _axes[1].set_xlabel("step")
     _axes[1].set_ylabel("RMSE (normalised)")
     _axes[1].legend(fontsize=8)
 
@@ -882,7 +883,6 @@ def run_training(
     plt.close(_fig)
 
     _cfo_final = float(_cfo_rmse_mean[-1])
-    _cfo_pi_final = float(_cfo_pi_rmse_mean[-1])
     _ar_final = float(_ar_rmse_mean[-1])
     _impr_vs_full = 100 * (1 - _cfo_final / (_ar_final + 1e-9))
 
@@ -890,20 +890,16 @@ def run_training(
         [
             mo.callout(
                 mo.md(
-                    f"**AR-full** trains on 100 % data (paper's hard baseline). "
-                    f"**AR-equal** and **CFO** train on the same {_kr} % sparse data. "
-                    "**CFO-PI** adds a physics regularisation term (known Lorenz equations) "
-                    "to the flow-matching loss."
+                    f"**AR-full** trains on 100% data (paper's hard baseline). "
+                    f"**AR-equal** and **CFO** train on the same {_kr}% sparse data."
                 ),
                 kind="info",
             ),
             mo.hstack(
                 [
                     mo.stat(f"{_losses_cfo[-1]:.4f}", label="CFO loss"),
-                    mo.stat(f"{_losses_pi[-1]:.4f}", label="CFO-PI loss"),
                     mo.stat(f"{_losses_ar[-1]:.4f}", label="AR-full loss"),
                     mo.stat(f"{_cfo_final:.3f}", label="CFO RMSE"),
-                    mo.stat(f"{_cfo_pi_final:.3f}", label="CFO-PI RMSE"),
                     mo.stat(f"{_ar_final:.3f}", label="AR-full RMSE"),
                     mo.stat(f"{_impr_vs_full:.1f} %", label="CFO vs AR-full"),
                 ]
@@ -963,7 +959,7 @@ def error_over_time(
     _ar_s = np.std(_all_ar_rmse, axis=0)
     _areq_m = np.mean(_all_areq_rmse, axis=0)
     _areq_s = np.std(_all_areq_rmse, axis=0)
-    _t_ax = np.arange(_H + 1) * _DT
+    _t_ax = np.arange(_H + 1)
 
     fig_err, ax_err = plt.subplots(figsize=(12, 4))
     ax_err.plot(_t_ax, _cfo_m, color="#7799ff", lw=2, label=f"CFO ({_kr} % data)")
@@ -978,10 +974,10 @@ def error_over_time(
     ax_err.plot(_t_ax, _areq_m, color="#44dd88", lw=2, linestyle=":", label=f"AR-equal ({_kr} % data)")
     ax_err.fill_between(_t_ax, _areq_m - _areq_s, _areq_m + _areq_s, color="#44dd88", alpha=0.2)
     ax_err.set_title(
-        f"Prediction RMSE over Time  ·  averaged over {_N_EVAL} test trajectories",
+        f"Prediction RMSE over Steps  ·  averaged over {_N_EVAL} test trajectories",
         color="#333333",
     )
-    ax_err.set_xlabel("time (s)")
+    ax_err.set_xlabel("step")
     ax_err.set_ylabel("RMSE (normalised, log scale)")
     ax_err.set_yscale("log")
     ax_err.legend(fontsize=10)
@@ -991,7 +987,7 @@ def error_over_time(
         ax_err.annotate(
             "AR-full diverges\npast CFO",
             xy=(_t_ax[_cross_idx], _ar_m[_cross_idx]),
-            xytext=(_t_ax[_cross_idx] + 0.25, _ar_m[_cross_idx] * 2.0),
+            xytext=(_t_ax[_cross_idx] + 3, _ar_m[_cross_idx] * 2.0),
             color="#ff8844",
             fontsize=8,
             arrowprops=dict(arrowstyle="->", color="#ff8844", lw=0.8),
@@ -1003,534 +999,113 @@ def error_over_time(
     return
 
 
+
 @app.cell(hide_code=True)
 def sweep_intro(mo):
     mo.md(r"""
-    ## Reproduction Result: The Data-Efficiency Frontier
+    ## Temporal Generalisation: One Model, Any Resolution
 
-    The single run above shows one setting at a time. The sweep below is the notebook's
-    main reproduction result: it trains **all four models** (CFO, CFO-PI, AR-full, AR-equal)
-    across five keep rates (10 – 100 %) with **three random seeds** each, revealing where
-    the continuous-time formulation compensates for missing data.
+    CFO learns a continuous vector field that can be queried at **any step size** without
+    retraining. AR is locked to its training $\Delta t$: a different resolution requires
+    a new model.
 
-    > AR-equal cannot use the irregular Δt between kept pairs — it learns
-    > state→state with a fixed implicit step. This is a structural limitation of
-    > the AR formulation that CFO does not share.
+    **Drag the slider** to vary the evaluation resolution using the single CFO model
+    trained above.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def sweep_controls(mo):
-    sweep_btn = mo.ui.run_button(
-        label="▶ Run Keep-Rate Sweep  (3 seeds × 5 rates × 4 models)"
+def resolution_controls(cfo_model, mo, norm_stats):
+    mo.stop(
+        cfo_model is None,
+        mo.callout(mo.md("Train models first. Click **▶ Train Three Models** above."), kind="neutral"),
     )
-    mo.vstack(
-        [
-            mo.callout(
-                mo.md(
-                    "This trains **60 models** (4 models × 5 keep rates × 3 seeds) "
-                    "at 100 epochs each. Expect 3–7 minutes on CPU."
-                ),
-                kind="warn",
-            ),
-            sweep_btn,
-        ]
+    _state_mean, _state_std, _T_MAX, _DT_TRAIN, _du_mean, _du_std = norm_stats
+    dt_slider = mo.ui.slider(
+        start=0.005, stop=0.1, step=0.005,
+        value=_DT_TRAIN, label="Evaluation Δt (s)", show_value=True,
     )
-    return (sweep_btn,)
+    dt_slider
+    return (dt_slider,)
 
 
 @app.cell(hide_code=True)
-def keep_rate_sweep(
-    ARNet,
-    CubicSpline,
-    TinyODENet,
-    ar_rollout,
-    compute_normalization,
-    generate_lorenz,
-    make_cfo_fn,
-    mo,
-    np,
-    plt,
-    rk4_ode,
-    sweep_btn,
-    torch,
+def continuous_resolution_demo(
+    ar_model, ar_rollout, cfo_model, dt_slider,
+    generate_lorenz, make_cfo_fn, mo, norm_stats, np, plt, rk4_ode,
 ):
-    sweep_btn  # reactive dependency
+    _state_mean, _state_std, _T_MAX, _DT_TRAIN, _du_mean, _du_std = norm_stats
+    _dt_eval = dt_slider.value
+    _horizon = 2.0
+    _n_steps = max(4, int(round(_horizon / _dt_eval)))
+    _ar_steps = max(4, int(round(_horizon / _DT_TRAIN)))
+    _rng = np.random.default_rng(7)
+    _x0 = _rng.uniform(-8, 8, 3)
+    _, _gt_fine = generate_lorenz(_x0, int(_horizon / 0.002), 0.002)
+    _x0_norm = ((_x0 - _state_mean) / _state_std).astype(np.float32)
+    _cfo_fn = make_cfo_fn(cfo_model, _du_mean, _du_std)
+    _dt_n = _dt_eval / _T_MAX
+    _traj_norm = rk4_ode(_cfo_fn, 0.0, _x0_norm, _dt_n, _n_steps)
+    _traj = _traj_norm * _state_std + _state_mean
+    _ar_traj_norm = ar_rollout(ar_model, _x0_norm, _ar_steps)
+    _ar_traj = _ar_traj_norm * _state_std + _state_mean
+    _steps_cfo = np.arange(_n_steps + 1, dtype=float)
+    _steps_ar = np.arange(_ar_steps + 1) * (_DT_TRAIN / _dt_eval)
+    _steps_gt = np.linspace(0.0, _n_steps, len(_gt_fine))
 
-    if not sweep_btn.value:
-        mo.stop(
-            True,
-            mo.callout(
-                mo.md(
-                    "Click **▶ Run Keep-Rate Sweep** to compare all four models across keep rates."
-                ),
-                kind="neutral",
-            ),
-        )
-
-    _DT_sw = 0.025
-    _N_STEPS_sw = 200
-    _N_TRAIN_sw = 20
-    _N_TEST_sw = 10
-    _EPOCHS_sw = 100  # shorter per run — sweep is meant to show trends
-    _LR_sw = 3e-3
-    _BATCH_sw = 128
-    _N_SMP_sw = 60  # spline samples per trajectory
-    _T_MAX_sw = _N_STEPS_sw * _DT_sw
-    _H_sw = 80  # prediction horizon (steps)
-    _N_EVAL_sw = 10  # test trajectories per seed
-
-    _KEEP_RATES_sw = [0.10, 0.25, 0.50, 0.75, 1.00]
-    _SEEDS_sw = [0, 1, 2]
-
-    # Fixed trajectory pool — same across all keep rates and seeds
-    _rng_base_sw = np.random.default_rng(42)
-    _all_x0_sw = _rng_base_sw.uniform(-8, 8, (_N_TRAIN_sw + _N_TEST_sw, 3))
-    _all_trajs_sw = [
-        generate_lorenz(_all_x0_sw[i], _N_STEPS_sw, _DT_sw)
-        for i in range(_N_TRAIN_sw + _N_TEST_sw)
-    ]
-    _train_trajs_sw = _all_trajs_sw[:_N_TRAIN_sw]
-    _test_trajs_sw = _all_trajs_sw[_N_TRAIN_sw:]
-
-    _state_mean_sw, _state_std_sw = compute_normalization(_train_trajs_sw)
-
-    # Normalise test trajectories once
-    _test_u_norm = [
-        ((_tr - _state_mean_sw) / _state_std_sw) for _, _tr in _test_trajs_sw
-    ]
-
-    def _sweep_run(kr, seed):
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        _rng_s = np.random.default_rng(seed + 200)
-
-        # ── CFO data (cubic spline) ────────────────────────────────────────────
-        _cfo_t_l, _cfo_u_l, _cfo_du_l, _kept_idx_l = [], [], [], []
-        for _times_r, _traj_r in _train_trajs_sw:
-            _n_pts = len(_times_r)
-            _n_keep = max(6, int(_n_pts * kr))
-            _idx = np.sort(_rng_s.choice(_n_pts, _n_keep, replace=False))
-            _kept_idx_l.append(_idx)
-            _t_sub = _times_r[_idx] / _T_MAX_sw
-            _u_sub = (_traj_r[_idx] - _state_mean_sw) / _state_std_sw
-            _cs = CubicSpline(_t_sub, _u_sub)
-            _t_smp = _rng_s.uniform(_t_sub[0], _t_sub[-1], _N_SMP_sw).astype(np.float32)
-            _cfo_t_l.append(_t_smp)
-            _cfo_u_l.append(_cs(_t_smp).astype(np.float32))
-            _cfo_du_l.append(_cs(_t_smp, 1).astype(np.float32))
-
-        _all_du = np.concatenate(_cfo_du_l, axis=0)
-        _du_mean_s = _all_du.mean(axis=0).astype(np.float32)
-        _du_std_s = (_all_du.std(axis=0) + 1e-8).astype(np.float32)
-        _cfo_du_sc = [(du - _du_mean_s) / _du_std_s for du in _cfo_du_l]
-
-        _T_c = torch.tensor(np.concatenate(_cfo_t_l))
-        _U_c = torch.tensor(np.concatenate(_cfo_u_l))
-        _DU_c = torch.tensor(np.concatenate(_cfo_du_sc))
-        _N_c = len(_T_c)
-
-        # ── AR-full data ───────────────────────────────────────────────────────
-        _u_af_l, _un_af_l = [], []
-        for _, _tr in _train_trajs_sw:
-            _un = ((_tr - _state_mean_sw) / _state_std_sw).astype(np.float32)
-            _u_af_l.append(_un[:-1])
-            _un_af_l.append(_un[1:])
-        _U_af = torch.tensor(np.concatenate(_u_af_l))
-        _UN_af = torch.tensor(np.concatenate(_un_af_l))
-        _N_af = len(_U_af)
-
-        # ── AR-equal data ──────────────────────────────────────────────────────
-        _u_ae_l, _un_ae_l = [], []
-        for (_, _tr), _idx in zip(_train_trajs_sw, _kept_idx_l):
-            _un = ((_tr - _state_mean_sw) / _state_std_sw).astype(np.float32)
-            _u_ae_l.append(_un[_idx[:-1]])
-            _un_ae_l.append(_un[_idx[1:]])
-        _U_ae = torch.tensor(np.concatenate(_u_ae_l))
-        _UN_ae = torch.tensor(np.concatenate(_un_ae_l))
-        _N_ae = len(_U_ae)
-
-        # ── Training helper ────────────────────────────────────────────────────
-        def _train_ar_net(U, UN, N):
-            m = ARNet()
-            opt = torch.optim.Adam(m.parameters(), lr=_LR_sw)
-            for _ in range(_EPOCHS_sw):
-                _p = np.random.permutation(N)
-                for _i in range(0, N, _BATCH_sw):
-                    _ib = _p[_i : _i + _BATCH_sw]
-                    _ub, _unb = U[_ib], UN[_ib]
-                    opt.zero_grad()
-                    torch.mean((_ub + m(_ub) - _unb) ** 2).backward()
-                    opt.step()
-            return m
-
-        def _train_cfo_net(T, U, DU, N):
-            m = TinyODENet()
-            opt = torch.optim.Adam(m.parameters(), lr=_LR_sw)
-            for _ in range(_EPOCHS_sw):
-                _p = np.random.permutation(N)
-                for _i in range(0, N, _BATCH_sw):
-                    _ib = _p[_i : _i + _BATCH_sw]
-                    opt.zero_grad()
-                    torch.mean((m(T[_ib], U[_ib]) - DU[_ib]) ** 2).backward()
-                    opt.step()
-            return m
-
-        _cfo_m = _train_cfo_net(_T_c, _U_c, _DU_c, _N_c)
-        _ar_full = _train_ar_net(_U_af, _UN_af, _N_af)
-        _ar_eq = _train_ar_net(_U_ae, _UN_ae, _N_ae)
-
-        # ── CFO-PI (warm-start from CFO, add physics regularisation) ─────────
-        _lorenz_deriv_sw = lambda s: np.array([10.0 * (s[1] - s[0]), s[0] * (28.0 - s[2]) - s[1], s[0] * s[1] - (8.0 / 3.0) * s[2]])
-        _cfo_pi_sw = TinyODENet()
-        _cfo_pi_sw.load_state_dict(_cfo_m.state_dict())
-        _opt_pi_sw = torch.optim.Adam(_cfo_pi_sw.parameters(), lr=_LR_sw * 0.5)
-        _LAMBDA_PI_sw = 0.5
-        _du_mean_t = torch.tensor(_du_mean_s)
-        _du_std_t = torch.tensor(_du_std_s)
-        _state_mean_t = torch.tensor(_state_mean_sw.astype(np.float32))
-        _state_std_t = torch.tensor(_state_std_sw.astype(np.float32))
-        _T_MAX_t = float(_T_MAX_sw)
-        for _ep_pi in range(_EPOCHS_sw):
-            _p = np.random.permutation(_N_c)
-            for _i in range(0, _N_c, _BATCH_sw):
-                _ib = _p[_i : _i + _BATCH_sw]
-                _opt_pi_sw.zero_grad()
-                _l_flow = torch.mean((_cfo_pi_sw(_T_c[_ib], _U_c[_ib]) - _DU_c[_ib]) ** 2)
-                _rng_ph = np.random.default_rng(_ep_pi * 1000 + _i)
-                _u_phys_ph = torch.tensor(
-                    _rng_ph.uniform(-15, 15, (32, 3)).astype(np.float32)
-                )
-                _t_rand_ph = torch.tensor(_rng_ph.uniform(0, 1, (32,)).astype(np.float32))
-                _u_n_ph = (_u_phys_ph - _state_mean_t) / _state_std_t
-                _v_phys = torch.tensor(
-                    np.stack([_lorenz_deriv_sw(u.numpy()) for u in _u_phys_ph]).astype(np.float32)
-                )
-                _v_tgt = (_v_phys / _state_std_t * _T_MAX_t - _du_mean_t) / _du_std_t
-                _l_phys = torch.mean((_cfo_pi_sw(_t_rand_ph, _u_n_ph) - _v_tgt) ** 2)
-                (_l_flow + _LAMBDA_PI_sw * _l_phys).backward()
-                _opt_pi_sw.step()
-
-        # ── Evaluation ────────────────────────────────────────────────────────
-        _cfo_fn = make_cfo_fn(_cfo_m, _du_mean_s, _du_std_s)
-        _cfo_pi_fn = make_cfo_fn(_cfo_pi_sw, _du_mean_s, _du_std_s)
-        _dt_n = _DT_sw / _T_MAX_sw
-        _r_cfo, _r_cfo_pi, _r_arf, _r_are = [], [], [], []
-        for _u_n_t in _test_u_norm[:_N_EVAL_sw]:
-            _u0 = _u_n_t[0]
-            _true = _u_n_t[: _H_sw + 1]
-            _r_cfo.append(float(np.sqrt(np.mean((rk4_ode(_cfo_fn, 0.0, _u0, _dt_n, _H_sw) - _true) ** 2))))
-            _r_cfo_pi.append(float(np.sqrt(np.mean((rk4_ode(_cfo_pi_fn, 0.0, _u0, _dt_n, _H_sw) - _true) ** 2))))
-            _r_arf.append(float(np.sqrt(np.mean((ar_rollout(_ar_full, _u0, _H_sw) - _true) ** 2))))
-            _r_are.append(float(np.sqrt(np.mean((ar_rollout(_ar_eq, _u0, _H_sw) - _true) ** 2))))
-        return np.mean(_r_cfo), np.mean(_r_cfo_pi), np.mean(_r_arf), np.mean(_r_are)
-
-    # ── Run the sweep ─────────────────────────────────────────────────────────
-    _res_cfo = np.zeros((len(_KEEP_RATES_sw), len(_SEEDS_sw)))
-    _res_cfo_pi = np.zeros_like(_res_cfo)
-    _res_arf = np.zeros_like(_res_cfo)
-    _res_are = np.zeros_like(_res_cfo)
-
-    for _ki, _kr in enumerate(_KEEP_RATES_sw):
-        for _si, _seed in enumerate(_SEEDS_sw):
-            _rc, _rcp, _ra, _rq = _sweep_run(_kr, _seed)
-            _res_cfo[_ki, _si] = _rc
-            _res_cfo_pi[_ki, _si] = _rcp
-            _res_arf[_ki, _si] = _ra
-            _res_are[_ki, _si] = _rq
-
-    _cfo_m_sw = _res_cfo.mean(axis=1)
-    _cfo_s_sw = _res_cfo.std(axis=1)
-    _cfo_pi_m_sw = _res_cfo_pi.mean(axis=1)
-    _cfo_pi_s_sw = _res_cfo_pi.std(axis=1)
-    _arf_m_sw = _res_arf.mean(axis=1)
-    _arf_s_sw = _res_arf.std(axis=1)
-    _are_m_sw = _res_are.mean(axis=1)
-    _are_s_sw = _res_are.std(axis=1)
-    _kr_vals_sw = [kr * 100 for kr in _KEEP_RATES_sw]
-
-    fig_sw, ax_sw = plt.subplots(1, 1, figsize=(12, 5))
-    fig_sw.suptitle(
-        f"Keep-Rate Sweep  ·  {len(_SEEDS_sw)} seeds × {len(_KEEP_RATES_sw)} keep rates"
-        f"  ·  {_EPOCHS_sw} epochs each  ·  horizon = {_H_sw} steps",
-        color="#222222",
-        fontsize=12,
-    )
-
-    ax_sw.plot(
-        _kr_vals_sw, _cfo_m_sw, color="#7799ff", lw=2.5, marker="o", label="CFO"
-    )
-    ax_sw.fill_between(
-        _kr_vals_sw,
-        _cfo_m_sw - _cfo_s_sw,
-        _cfo_m_sw + _cfo_s_sw,
-        color="#7799ff",
-        alpha=0.2,
-    )
-    ax_sw.plot(
-        _kr_vals_sw, _cfo_pi_m_sw, color="#aa55ff", lw=2.5, marker="D",
-        linestyle="-.", label="CFO-PI (+ physics)",
-    )
-    ax_sw.fill_between(
-        _kr_vals_sw,
-        _cfo_pi_m_sw - _cfo_pi_s_sw,
-        _cfo_pi_m_sw + _cfo_pi_s_sw,
-        color="#aa55ff",
-        alpha=0.2,
-    )
-    ax_sw.plot(
-        _kr_vals_sw,
-        _arf_m_sw,
-        color="#ff8844",
-        lw=2,
-        marker="s",
-        linestyle="--",
-        label="AR-full (100 %)",
-    )
-    ax_sw.fill_between(
-        _kr_vals_sw,
-        _arf_m_sw - _arf_s_sw,
-        _arf_m_sw + _arf_s_sw,
-        color="#ff8844",
-        alpha=0.2,
-    )
-    ax_sw.plot(
-        _kr_vals_sw,
-        _are_m_sw,
-        color="#44dd88",
-        lw=2,
-        marker="^",
-        linestyle=":",
-        label="AR-equal",
-    )
-    ax_sw.fill_between(
-        _kr_vals_sw,
-        _are_m_sw - _are_s_sw,
-        _are_m_sw + _are_s_sw,
-        color="#44dd88",
-        alpha=0.2,
-    )
-
-    # Flat reference line: AR-full mean RMSE across all keep rates
-    _arf_ref = float(_arf_m_sw.mean())
-    ax_sw.axhline(
-        _arf_ref,
-        color="#ff8844",
-        lw=1.0,
-        linestyle=":",
-        alpha=0.5,
-        label=f"AR-full baseline ≈ {_arf_ref:.3f}",
-    )
-
-    # Annotate first keep rate where CFO-PI beats AR-full
-    _win_mask_pi = _cfo_pi_m_sw < _arf_m_sw
-    if _win_mask_pi.any():
-        _win_kr_pi = _kr_vals_sw[int(np.argmax(_win_mask_pi))]
-        _win_rmse_pi = float(_cfo_pi_m_sw[int(np.argmax(_win_mask_pi))])
-        ax_sw.annotate(
-            f"CFO-PI wins here\n({_win_kr_pi:.0f} % data)",
-            xy=(_win_kr_pi, _win_rmse_pi),
-            xytext=(_win_kr_pi + 6, _win_rmse_pi + (_arf_ref - _win_rmse_pi) * 0.5),
-            color="#aa55ff",
-            fontsize=9,
-            arrowprops=dict(arrowstyle="->", color="#aa55ff", lw=0.9),
-        )
-
-    ax_sw.set_xlabel("Keep rate — % of time points per trajectory")
-    ax_sw.set_ylabel(f"Mean final RMSE (normalised, horizon = {_H_sw} steps)")
-    ax_sw.set_title(
-        "Data Efficiency: RMSE vs Keep Rate  (mean ± 1 std, 3 seeds)", color="#333333"
-    )
-    ax_sw.legend(fontsize=9)
-
-    plt.tight_layout()
-    _sw_out = mo.center(mo.as_html(fig_sw))
-    plt.close(fig_sw)
-
-    mo.vstack(
-        [
-            _sw_out,
-            mo.callout(
-                mo.md(
-                    "Where CFO/CFO-PI (blue/purple) dip below the orange dashed AR-full line reveals the "
-                    "keep rate at which the continuous-time inductive bias compensates for the data disadvantage. "
-                    "CFO-PI's physics regularisation can shift this crossover to even lower keep rates — "
-                    "the governing equations substitute for missing data."
-                ),
-                kind="info",
-            ),
-        ]
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def physics_interp_intro(mo):
-    mo.md(r"""
-    ## Novel Contribution: Physics-Informed CFO
-
-    The CFO paper (Section 6) identifies **physics integration** as the natural next step:
-
-    > *"When governing equations are partially known, augmenting training with physics-informed
-    > constraints could improve backward integration stability."*
-
-    This notebook implements that idea as **CFO-PI**. Starting from a trained CFO model,
-    we add a regularisation term that penalises deviation of the learned vector field
-    $N_\theta(t, u)$ from the true Lorenz equations at random state-space points:
-
-    $$\mathcal{L}_\text{PI} = \mathcal{L}_\text{flow} + \lambda \,\mathbb{E}_{u}\bigl[\|N_\theta(t, u) - f_\text{Lorenz}(u)\|^2\bigr]$$
-
-    This is the notebook's main novel contribution.
-
-    **Why is this natural for CFO, but not for a standard AR baseline?**
-    CFO's output *is* a vector field — every prediction $N_\theta(t, u)$ is a velocity
-    that can be compared to the true physics at any state-space point, even outside
-    the training trajectories. AR predicts discrete transitions $F(u) \to u'$ and does
-    not expose the same continuous object to regularise against a differential equation.
-
-    **Test:** Query $N_\theta(t, u)$ on a 2-D grid of state-space points and compare to the
-    true Lorenz field. If CFO-PI works, it should match the governing equations more closely
-    than vanilla CFO and potentially improve data efficiency as well.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def physics_interp_viz(
-    cfo_model,
-    cfo_pi_model,
-    lorenz_deriv,
-    make_cfo_fn,
-    mo,
-    norm_stats,
-    np,
-    plt,
-):
-    if cfo_pi_model is None:
-        mo.stop(True)
-
-    _state_mean, _state_std, _T_MAX, _, _du_mean, _du_std = norm_stats
-
-    # 2D grid in physical space: x ∈ [-20, 20], y ∈ [-25, 30] at z = 25
-    _nx, _ny = 16, 16
-    _xs = np.linspace(-20, 20, _nx)
-    _ys = np.linspace(-25, 30, _ny)
-    _XX, _YY = np.meshgrid(_xs, _ys)
-    _ZZ = np.full_like(_XX, 25.0)
-    _grid_phys = np.stack([_XX.ravel(), _YY.ravel(), _ZZ.ravel()], axis=1)  # (N, 3)
-
-    # True Lorenz velocity on grid (physical space)
-    _v_true = np.stack([lorenz_deriv(u) for u in _grid_phys])  # (N, 3)
-
-    def _query_field(model, grid_phys):
-        _fn = make_cfo_fn(model, _du_mean, _du_std)
-        _t_fixed = 0.5  # mid-range normalised time
-        _vels = []
-        for _u_p in grid_phys:
-            _u_n = (_u_p - _state_mean) / _state_std
-            _v_n = _fn(_t_fixed, _u_n)               # d(u_n)/d(t_n)
-            _v_p = _v_n * _state_std / _T_MAX         # physical velocity
-            _vels.append(_v_p)
-        return np.array(_vels)
-
-    _v_cfo = _query_field(cfo_model, _grid_phys)
-    _v_pi = _query_field(cfo_pi_model, _grid_phys)
-
-    # Residual magnitude (x-y components only)
-    _res_cfo = np.linalg.norm(_v_cfo[:, :2] - _v_true[:, :2], axis=1).reshape(_ny, _nx)
-    _res_pi = np.linalg.norm(_v_pi[:, :2] - _v_true[:, :2], axis=1).reshape(_ny, _nx)
-    _rmse_cfo = float(np.mean(_res_cfo))
-    _rmse_pi = float(np.mean(_res_pi))
-
-    # Normalise arrows to unit length for direction-only comparison
-    def _unit(arr2d_u, arr2d_v):
-        _mag = np.sqrt(arr2d_u ** 2 + arr2d_v ** 2) + 1e-10
-        return arr2d_u / _mag, arr2d_v / _mag
-
-    _U_true = _v_true[:, 0].reshape(_ny, _nx)
-    _V_true = _v_true[:, 1].reshape(_ny, _nx)
-    _U_cfo = _v_cfo[:, 0].reshape(_ny, _nx)
-    _V_cfo = _v_cfo[:, 1].reshape(_ny, _nx)
-    _U_pi = _v_pi[:, 0].reshape(_ny, _nx)
-    _V_pi = _v_pi[:, 1].reshape(_ny, _nx)
-
-    _Ut, _Vt = _unit(_U_true, _V_true)
-    _Uc, _Vc = _unit(_U_cfo, _V_cfo)
-    _Up, _Vp = _unit(_U_pi, _V_pi)
-
-    fig_vf, axes_vf = plt.subplots(1, 3, figsize=(14, 4.5))
-    fig_vf.suptitle(
-        "Vector Field Alignment (x–y slice at z = 25) — Does the model learn the governing equations?",
+    fig_res, axes_res = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig_res.suptitle(
+        f"CFO at Δt={_dt_eval:.3f}s ({_n_steps} steps)  vs  AR locked to Δt={_DT_TRAIN:.3f}s ({_ar_steps} steps)",
         color="#222222", fontsize=11,
     )
-    _qkw = {"alpha": 0.85, "width": 0.003}
 
-    # Panel 1: True Lorenz
-    axes_vf[0].quiver(_XX, _YY, _Ut, _Vt, color="#333333", **_qkw)
-    axes_vf[0].set_title("True Lorenz field", color="#333333")
-    axes_vf[0].set_xlabel("x")
-    axes_vf[0].set_ylabel("y")
+    # Panel 1: x-z phase portrait
+    axes_res[0].plot(_gt_fine[:, 0], _gt_fine[:, 2], color="#aaaaaa", lw=0.6, alpha=0.5, label="ground truth")
+    axes_res[0].plot(_traj[:, 0], _traj[:, 2], color="#7799ff", lw=1.8, label=f"CFO (Δt={_dt_eval:.3f}s)")
+    axes_res[0].plot(_ar_traj[:, 0], _ar_traj[:, 2], color="#ff8844", lw=1.5, linestyle="--", label=f"AR (Δt={_DT_TRAIN:.3f}s, fixed)")
+    axes_res[0].set_xlabel("x"); axes_res[0].set_ylabel("z")
+    axes_res[0].set_title("Phase portrait (x–z)", color="#333333")
+    axes_res[0].legend(fontsize=8)
 
-    # Panel 2: CFO
-    _im_cfo = axes_vf[1].imshow(
-        _res_cfo, extent=[-20, 20, -25, 30], origin="lower",
-        cmap="Reds", alpha=0.35, aspect="auto",
-    )
-    axes_vf[1].quiver(_XX, _YY, _Uc, _Vc, color="#7799ff", **_qkw)
-    axes_vf[1].set_title(f"CFO  (mean residual = {_rmse_cfo:.1f})", color="#333333")
-    axes_vf[1].set_xlabel("x")
+    # Panel 2: x over steps
+    axes_res[1].plot(_steps_gt, _gt_fine[:, 0], color="#aaaaaa", lw=0.6, alpha=0.5, label="ground truth")
+    axes_res[1].plot(_steps_cfo, _traj[:, 0], color="#7799ff", lw=1.8, label=f"CFO (Δt={_dt_eval:.3f}s)")
+    axes_res[1].plot(_steps_ar, _ar_traj[:, 0], color="#ff8844", lw=1.5, linestyle="--", label=f"AR (Δt={_DT_TRAIN:.3f}s, fixed)")
+    axes_res[1].set_xlabel("step (CFO units)"); axes_res[1].set_ylabel("x")
+    axes_res[1].set_title("x-component over time", color="#333333")
+    axes_res[1].legend(fontsize=8)
 
-    # Panel 3: CFO-PI
-    _im_pi = axes_vf[2].imshow(
-        _res_pi, extent=[-20, 20, -25, 30], origin="lower",
-        cmap="Reds", alpha=0.35, aspect="auto",
-        vmin=_im_cfo.norm.vmin, vmax=_im_cfo.norm.vmax,
-    )
-    axes_vf[2].quiver(_XX, _YY, _Up, _Vp, color="#aa55ff", **_qkw)
-    axes_vf[2].set_title(f"CFO-PI  (mean residual = {_rmse_pi:.1f})", color="#333333")
-    axes_vf[2].set_xlabel("x")
-
-    fig_vf.colorbar(_im_pi, ax=axes_vf[1:], label="‖predicted − true‖ (physical units)", shrink=0.85)
     plt.tight_layout()
-    _vf_out = mo.center(mo.as_html(fig_vf))
-    plt.close(fig_vf)
+    _res_out = mo.center(mo.as_html(fig_res))
+    plt.close(fig_res)
 
     mo.vstack([
-        _vf_out,
+        _res_out,
         mo.callout(
             mo.md(
-                f"The red heatmap shows the pointwise error between each model's predicted velocity "
-                f"and the true Lorenz field. "
-                f"CFO-PI mean residual = **{_rmse_pi:.1f}** vs CFO = **{_rmse_cfo:.1f}** (lower is better). "
-                "This is the main novel result in the notebook: equation-level physics regularization is "
-                "natural for CFO because it predicts a continuous vector field, whereas standard AR baselines "
-                "do not expose the same object."
+                f"CFO uses **{_n_steps} steps** at the chosen resolution. "
+                f"AR is always fixed to {_ar_steps} steps at its training Δt. "
+                "Change the slider: the CFO trajectory updates instantly, no retraining."
             ),
-            kind="success",
+            kind="info",
         ),
     ])
     return
-
 
 @app.cell(hide_code=True)
 def phase_portrait_intro(mo):
     mo.md(r"""
     ## Supporting Diagnostic: Attractor Recovery
 
-    The Lorenz system has a **strange attractor** — a fractal set that captures the long-run
-    geometry of the dynamics. We treat attractor recovery as **supporting evidence**, not the
-    primary novelty claim.
+    The Lorenz attractor is a fractal set capturing the long-run geometry of the dynamics.
+    We treat recovery as **supporting evidence**: models with better local dynamics should
+    also produce better global geometry on long rollouts.
 
-    If a model learns better local dynamics, its long-horizon rollouts from new initial
-    conditions should also recover better global geometry. That makes the phase portrait a
-    useful downstream diagnostic of learned dynamics quality.
+    **Test**: roll out each model for 800 steps from 20 fresh initial conditions outside
+    the training distribution.
 
-    **Phase portrait test**: roll out each model for 800 steps from 20 fresh initial
-    conditions (outside the training distribution). Does the long-run geometry match the
-    true attractor?
-
-    > The attractor is never part of the training objective.
+    > Attractor shape is not part of the training objective.
     > Recovery is a downstream sanity check on the learned vector field.
     """)
     return
@@ -1641,9 +1216,8 @@ def phase_portrait_viz(
                     f"**Panel 1** = ground-truth Lorenz attractor. "
                     f"**Remaining panels** = each model rolled out for {_N_PORTRAIT} steps from {_N_ICS} fresh initial conditions "
                     "(outside the training distribution). "
-                    "Use this section as downstream evidence rather than the main novelty claim: models with better "
-                    "learned local dynamics should produce better global geometry. CFO and CFO-PI both recover the "
-                    "true strange attractor, while the AR baselines collapse to simpler, incorrect long-run behavior."
+                    "Use this as downstream evidence: CFO recovers the true strange attractor, "
+                    "while AR baselines collapse to simpler or incorrect long-run geometry."
                 ),
                 kind="info",
             ),
@@ -1651,6 +1225,273 @@ def phase_portrait_viz(
     )
     return
 
+
+
+@app.cell(hide_code=True)
+def parametric_intro(mo):
+    mo.md(r"""
+    ## Novel Contribution: Parametric CFO
+
+    One CFO model, conditioned on the Lorenz parameter $\rho$, learns the **entire family**
+    of attractors at once. At inference, setting $\rho$ yields a continuous vector field for
+    that attractor without retraining.
+
+    This is not in the original paper. It is the notebook's primary novel contribution.
+    The model conditions on normalised $\rho$ as an extra scalar input to the network, trained
+    jointly on trajectories sampled from $\rho \in \{25, 28, 32, 35, 38\}$.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def parametric_train_controls(mo):
+    param_epochs_slider = mo.ui.slider(start=100, stop=500, step=50, value=200, label="Epochs", show_value=True)
+    param_hidden_slider = mo.ui.slider(start=64, stop=256, step=32, value=128, label="Hidden size", show_value=True)
+    param_traj_slider = mo.ui.slider(start=5, stop=20, step=5, value=10, label="Trajectories per ρ", show_value=True)
+    param_train_btn = mo.ui.run_button(label="▶ Train Parametric CFO")
+    mo.vstack([
+        mo.hstack([param_epochs_slider, param_hidden_slider, param_traj_slider]),
+        param_train_btn,
+    ])
+    return param_train_btn, param_epochs_slider, param_hidden_slider, param_traj_slider
+
+
+@app.cell(hide_code=True)
+def parametric_training(
+    TinyODENetParam, QuinticHermiteSpline, compute_normalization,
+    generate_lorenz_param, mo, nn, np, param_train_btn,
+    param_epochs_slider, param_hidden_slider, param_traj_slider, torch,
+):
+    mo.stop(
+        not param_train_btn.value,
+        mo.callout(mo.md("Click **▶ Train Parametric CFO** to train."), kind="neutral"),
+    )
+    _RHOS = [25.0, 28.0, 32.0, 35.0, 38.0]
+    _DT_P = 0.025
+    _N_STEPS_P = 200
+    _N_SMP_P = 60
+    _EPOCHS_P = param_epochs_slider.value
+    _HIDDEN_P = param_hidden_slider.value
+    _N_TRAJ_P = param_traj_slider.value
+    _LR_P = 3e-3
+    _BATCH_P = 256
+    _T_MAX_P = _N_STEPS_P * _DT_P
+    _rng_p = np.random.default_rng(42)
+    _all_trajs_p = []
+    for _rho_val in _RHOS:
+        for _ in range(_N_TRAJ_P):
+            _x0_p = _rng_p.uniform(-8, 8, 3)
+            _ts_p, _traj_p = generate_lorenz_param(_x0_p, _N_STEPS_P, _rho_val, _DT_P)
+            _all_trajs_p.append((_ts_p, _traj_p, _rho_val))
+    _flat_trajs = [(_ts, _tr) for _ts, _tr, _ in _all_trajs_p]
+    _p_state_mean, _p_state_std = compute_normalization(_flat_trajs)
+    _RHO_MEAN = float(np.mean(_RHOS))
+    _RHO_STD = float(np.std(_RHOS) + 1e-8)
+    _T_p, _U_p, _DU_p, _RHO_p = [], [], [], []
+    for _ts_p, _tr_p, _rho_v in _all_trajs_p:
+        _t_sub = _ts_p / _T_MAX_P
+        _u_sub = (_tr_p - _p_state_mean) / _p_state_std
+        _cs_p = QuinticHermiteSpline(_t_sub.astype(np.float64), _u_sub)
+        _t_smp = _rng_p.uniform(_t_sub[0], _t_sub[-1], _N_SMP_P).astype(np.float32)
+        _T_p.append(_t_smp)
+        _U_p.append(_cs_p(_t_smp).astype(np.float32))
+        _DU_p.append(_cs_p(_t_smp, 1).astype(np.float32))
+        _RHO_p.append(np.full(_N_SMP_P, (_rho_v - _RHO_MEAN) / _RHO_STD, dtype=np.float32))
+    _all_du_p = np.concatenate(_DU_p, axis=0)
+    _p_du_mean = _all_du_p.mean(axis=0).astype(np.float32)
+    _p_du_std = (_all_du_p.std(axis=0) + 1e-8).astype(np.float32)
+    _DU_sc = [(du - _p_du_mean) / _p_du_std for du in _DU_p]
+    _T_t = torch.tensor(np.concatenate(_T_p))
+    _U_t = torch.tensor(np.concatenate(_U_p))
+    _DU_t = torch.tensor(np.concatenate(_DU_sc))
+    _RHO_t = torch.tensor(np.concatenate(_RHO_p)).unsqueeze(1)
+    _N_P = len(_T_t)
+    param_cfo_model = TinyODENetParam(state_dim=3, hidden=_HIDDEN_P)
+    _opt_p = torch.optim.Adam(param_cfo_model.parameters(), lr=_LR_P)
+    _losses_p = []
+    for _ep_p in range(_EPOCHS_P):
+        _perm = np.random.permutation(_N_P)
+        _ep_loss = 0.0
+        for _i in range(0, _N_P, _BATCH_P):
+            _ib = _perm[_i:_i + _BATCH_P]
+            _opt_p.zero_grad()
+            _l = torch.mean((param_cfo_model(_T_t[_ib], _U_t[_ib], _RHO_t[_ib]) - _DU_t[_ib]) ** 2)
+            _l.backward()
+            _opt_p.step()
+            _ep_loss += float(_l) * len(_ib)
+        _losses_p.append(_ep_loss / _N_P)
+    param_norm_stats = (_p_state_mean, _p_state_std, _T_MAX_P, _DT_P, _p_du_mean, _p_du_std, _RHO_MEAN, _RHO_STD)
+    mo.callout(mo.md(f"Parametric CFO trained. Final loss: {_losses_p[-1]:.4f}"), kind="success")
+    return param_cfo_model, param_norm_stats
+
+
+@app.cell(hide_code=True)
+def parametric_explore_controls(mo, param_cfo_model):
+    mo.stop(
+        param_cfo_model is None,
+        mo.callout(mo.md("Train Parametric CFO first."), kind="neutral"),
+    )
+    rho_slider = mo.ui.slider(start=15.0, stop=50.0, step=0.5, value=28.0, label="ρ (Lorenz parameter)", show_value=True)
+    rho_slider
+    return (rho_slider,)
+
+
+@app.cell(hide_code=True)
+def vector_field_viz(
+    generate_lorenz_param, make_cfo_param_fn, mo, np, param_cfo_model,
+    param_norm_stats, plt, rho_slider, rk4_ode,
+):
+    _sm, _ss, _T_MAX_p, _DT_p, _du_m, _du_s, _RHO_M, _RHO_S = param_norm_stats
+    _rho = rho_slider.value
+    _rho_n = (_rho - _RHO_M) / _RHO_S
+    _cfo_p_fn = make_cfo_param_fn(param_cfo_model, _rho_n, _du_m, _du_s)
+    _rng_vf = np.random.default_rng(99)
+    _x0_vf = _rng_vf.uniform(-8, 8, 3)
+    _, _gt_vf = generate_lorenz_param(_x0_vf, 300, _rho, _DT_p)
+    _x0_n_vf = ((_x0_vf - _sm) / _ss).astype(np.float32)
+    _dt_n_vf = _DT_p / _T_MAX_p
+    _cfo_traj_n = rk4_ode(_cfo_p_fn, 0.0, _x0_n_vf, _dt_n_vf, 300)
+    _cfo_traj_vf = _cfo_traj_n * _ss + _sm
+
+    # Grid for streamlines (x-z slice at y=0)
+    _nx, _nz = 20, 20
+    _xs = np.linspace(-20, 20, _nx)
+    _zs = np.linspace(0, 50, _nz)
+    _XX, _ZZ = np.meshgrid(_xs, _zs)
+    _YY = np.zeros_like(_XX)
+    _UU = np.zeros_like(_XX); _WW = np.zeros_like(_XX)
+    _UU_c = np.zeros_like(_XX); _WW_c = np.zeros_like(_XX)
+
+    for _i_g in range(_nz):
+        for _j_g in range(_nx):
+            _u_p = np.array([_XX[_i_g, _j_g], _YY[_i_g, _j_g], _ZZ[_i_g, _j_g]])
+            _sigma, _beta = 10.0, 8.0 / 3.0
+            _x, _y, _z = _u_p
+            _dxyz = np.array([_sigma*(_y-_x), _x*(_rho-_z)-_y, _x*_y-_beta*_z])
+            _UU[_i_g, _j_g] = _dxyz[0]; _WW[_i_g, _j_g] = _dxyz[2]
+            _u_n_g = ((_u_p - _sm) / _ss).astype(np.float32)
+            _v_n_g = _cfo_p_fn(0.5, _u_n_g)
+            _v_p_g = _v_n_g * _ss / _T_MAX_p
+            _UU_c[_i_g, _j_g] = _v_p_g[0]; _WW_c[_i_g, _j_g] = _v_p_g[2]
+
+    fig_vf2, axes_vf2 = plt.subplots(1, 2, figsize=(12, 5))
+    fig_vf2.suptitle(f"Parametric CFO: ρ = {_rho:.1f}  (x–z slice at y = 0)", color="#222222", fontsize=11)
+
+    axes_vf2[0].streamplot(_xs, _zs, _UU, _WW, color=np.sqrt(_UU**2+_WW**2), cmap="Blues", linewidth=0.8, density=1.2)
+    axes_vf2[0].plot(_gt_vf[:, 0], _gt_vf[:, 2], color="#333333", lw=1.5, alpha=0.8, label="True traj")
+    axes_vf2[0].set_xlabel("x"); axes_vf2[0].set_ylabel("z")
+    axes_vf2[0].set_title("True Lorenz field", color="#333333")
+    axes_vf2[0].legend(fontsize=8)
+
+    axes_vf2[1].streamplot(_xs, _zs, _UU_c, _WW_c, color=np.sqrt(_UU_c**2+_WW_c**2), cmap="Purples", linewidth=0.8, density=1.2)
+    axes_vf2[1].plot(_cfo_traj_vf[:, 0], _cfo_traj_vf[:, 2], color="#7799ff", lw=1.5, alpha=0.8, label="CFO traj")
+    axes_vf2[1].plot(_gt_vf[:, 0], _gt_vf[:, 2], color="#aaaaaa", lw=0.8, alpha=0.5, label="True traj")
+    axes_vf2[1].set_xlabel("x"); axes_vf2[1].set_ylabel("z")
+    axes_vf2[1].set_title("Parametric CFO field", color="#333333")
+    axes_vf2[1].legend(fontsize=8)
+
+    plt.tight_layout()
+    _vf2_out = mo.center(mo.as_html(fig_vf2))
+    plt.close(fig_vf2)
+    _vf2_out
+    return
+
+
+@app.cell(hide_code=True)
+def field_click_panel(
+    go, mo, np, param_cfo_model, param_norm_stats, rho_slider,
+):
+    _sm, _ss, _T_MAX_p, _DT_p, _du_m, _du_s, _RHO_M, _RHO_S = param_norm_stats
+    _rho = rho_slider.value
+    _rho_n = float((_rho - _RHO_M) / _RHO_S)
+
+    _nx, _nz = 30, 30
+    _xs_g = np.linspace(-22, 22, _nx)
+    _zs_g = np.linspace(0, 52, _nz)
+    _XX_g, _ZZ_g = np.meshgrid(_xs_g, _zs_g)
+    _speed = np.zeros((_nz, _nx))
+
+    import torch as _torch
+    with _torch.no_grad():
+        for _i in range(_nz):
+            _u_row = np.stack([
+                _XX_g[_i], np.zeros(_nx), _ZZ_g[_i]
+            ], axis=1)
+            _u_n_row = ((_u_row - _sm) / _ss).astype(np.float32)
+            _t_row = _torch.tensor([0.5] * _nx, dtype=_torch.float32)
+            _u_t_row = _torch.tensor(_u_n_row)
+            _rho_t_row = _torch.tensor([[_rho_n]] * _nx, dtype=_torch.float32)
+            _v_n_row = param_cfo_model(_t_row, _u_t_row, _rho_t_row).numpy()
+            _v_p_row = _v_n_row * _ss / _T_MAX_p
+            _speed[_i] = np.sqrt(_v_p_row[:, 0]**2 + _v_p_row[:, 2]**2)
+
+    _fig_click = go.Figure()
+    _fig_click.add_trace(go.Heatmap(
+        x=_xs_g, y=_zs_g, z=_speed,
+        colorscale="Viridis", showscale=True,
+        colorbar=dict(title="speed"),
+    ))
+    _fig_click.update_layout(
+        title=f"Click a point to launch a trajectory (ρ = {_rho:.1f})",
+        xaxis_title="x", yaxis_title="z",
+        width=600, height=450,
+        margin=dict(l=50, r=20, t=50, b=50),
+    )
+    field_click = mo.ui.plotly(_fig_click)
+    mo.vstack([
+        mo.md("**Click anywhere on the heatmap** to set an initial condition (x, z) at y = 0. The trajectory appears below."),
+        field_click,
+    ])
+    return (field_click,)
+
+
+@app.cell(hide_code=True)
+def click_trajectory(
+    field_click, generate_lorenz_param, make_cfo_param_fn, mo,
+    np, param_cfo_model, param_norm_stats, plt, rho_slider, rk4_ode,
+):
+    _clicked = field_click.value
+    if not _clicked:
+        mo.stop(True, mo.md("Click on the heatmap above to launch a trajectory."))
+    _pt = _clicked[0]
+    _x0_click = float(_pt["x"])
+    _z0_click = float(_pt["y"])
+    _y0_click = 0.0
+    _ic_click = np.array([_x0_click, _y0_click, _z0_click])
+
+    _sm, _ss, _T_MAX_p, _DT_p, _du_m, _du_s, _RHO_M, _RHO_S = param_norm_stats
+    _rho = rho_slider.value
+    _rho_n = (_rho - _RHO_M) / _RHO_S
+    _cfo_p_fn = make_cfo_param_fn(param_cfo_model, _rho_n, _du_m, _du_s)
+
+    _, _gt_click = generate_lorenz_param(_ic_click, 300, _rho, _DT_p)
+    _x0_n_click = ((_ic_click - _sm) / _ss).astype(np.float32)
+    _dt_n_click = _DT_p / _T_MAX_p
+    _cfo_click_n = rk4_ode(_cfo_p_fn, 0.0, _x0_n_click, _dt_n_click, 300)
+    _cfo_click = _cfo_click_n * _ss + _sm
+
+    fig_click_traj, axes_ct = plt.subplots(1, 2, figsize=(11, 4))
+    fig_click_traj.suptitle(
+        f"Trajectory from IC: x={_x0_click:.1f}, z={_z0_click:.1f}, y=0  |  ρ={_rho:.1f}",
+        color="#222222", fontsize=10,
+    )
+    axes_ct[0].plot(_gt_click[:, 0], _gt_click[:, 2], color="#333333", lw=1.5, label="True")
+    axes_ct[0].plot(_cfo_click[:, 0], _cfo_click[:, 2], color="#7799ff", lw=1.5, linestyle="--", label="Param CFO")
+    axes_ct[0].scatter([_x0_click], [_z0_click], color="red", zorder=5, s=60, label="IC")
+    axes_ct[0].set_xlabel("x"); axes_ct[0].set_ylabel("z")
+    axes_ct[0].set_title("Phase portrait (x–z)", color="#333333")
+    axes_ct[0].legend(fontsize=8)
+    _steps_ct = np.arange(301)
+    axes_ct[1].plot(_steps_ct, _gt_click[:, 0], color="#333333", lw=1.5, label="True x")
+    axes_ct[1].plot(_steps_ct, _cfo_click[:, 0], color="#7799ff", lw=1.5, linestyle="--", label="Param CFO x")
+    axes_ct[1].set_xlabel("step"); axes_ct[1].set_ylabel("x")
+    axes_ct[1].set_title("x-component over time", color="#333333")
+    axes_ct[1].legend(fontsize=8)
+    plt.tight_layout()
+    _ct_out = mo.center(mo.as_html(fig_click_traj))
+    plt.close(fig_click_traj)
+    _ct_out
+    return
 
 @app.cell(hide_code=True)
 def takeaways(mo):
@@ -1660,9 +1501,9 @@ def takeaways(mo):
     | # | What this notebook shows | Role |
     |---|---|---|
     | 1 | CFO reproduces the paper's core Lorenz advantage: strong performance from **sparse, irregular** observations against AR baselines | Reproduction |
-    | 2 | In this demo, AR errors compound more severely over long rollouts than CFO errors | Reproduction |
-    | 3 | **CFO-PI** implements the paper's proposed physics integration idea in an executable notebook | Novel |
-    | 4 | CFO-PI improves vector-field alignment and can shift the CFO/AR crossover to lower keep rates | Novel |
+    | 2 | CFO learns a continuous vector field that is **resolution-agnostic**: query at any step size without retraining | Reproduction + demo |
+    | 3 | **Parametric CFO** conditions on Lorenz $\\rho$, learning the entire family of attractors with one model | Novel |
+    | 4 | The clickable vector field lets you launch trajectories from any initial condition across the attractor family | Novel demo |
     | 5 | Attractor recovery is supporting evidence: better local dynamics lead to better global geometry | Supporting evidence |
 
     ---
