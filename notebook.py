@@ -64,7 +64,12 @@ def title_cell(mo):
        learns a vector field, it can be evaluated at any step size after a single training run.
     2. **Novel extension**: a single model conditioned on $\rho$ learns the entire Lorenz
        attractor family. Click any point on the vector field to launch a trajectory.
-       
+
+    > *Scope note:* the original paper validates CFO on both ODE (Lorenz) and 1D/2D PDE
+    > benchmarks (Burgers, diffusion-reaction, shallow water). This notebook focuses on
+    > the ODE case for browser-interactive demos; see *Limitations* at the bottom for the
+    > full PDE-scale picture.
+
     | | Standard AR | **CFO** |
     |---|---|---|
     | Learns | step map $F_\phi$ | vector field $\mathcal{N}_\theta(t, u)$ |
@@ -916,7 +921,7 @@ def run_training(
     cfo_model = TinyODENet()
     _opt_cfo = torch.optim.Adam(cfo_model.parameters(), lr=_LR)
     _losses_cfo = []
-    for _ in range(_EPOCHS):
+    for _ in mo.status.progress_bar(range(_EPOCHS), title="Training CFO"):
         _perm = np.random.permutation(_N_CFO)
         _ep_loss = 0.0
         _nb = 0
@@ -936,7 +941,7 @@ def run_training(
     ar_model = ARNet()
     _opt_ar = torch.optim.Adam(ar_model.parameters(), lr=_LR)
     _losses_ar = []
-    for _ in range(_EPOCHS):
+    for _ in mo.status.progress_bar(range(_EPOCHS), title="Training AR-full"):
         _perm = np.random.permutation(_N_AR)
         _ep_loss = 0.0
         _nb = 0
@@ -956,7 +961,7 @@ def run_training(
     ar_eq_model = ARNet()
     _opt_areq = torch.optim.Adam(ar_eq_model.parameters(), lr=_LR)
     _losses_areq = []
-    for _ in range(_EPOCHS):
+    for _ in mo.status.progress_bar(range(_EPOCHS), title="Training AR-equal"):
         _perm = np.random.permutation(_N_AREQ)
         _ep_loss = 0.0
         _nb = 0
@@ -1105,7 +1110,15 @@ def error_over_time(
     rk4_ode,
 ):
     if cfo_model is None:
-        mo.stop(True)
+        mo.stop(
+            True,
+            mo.callout(
+                mo.md(
+                    "Train CFO above (▶ Train Three Models) to see resolution-sweep error curves."
+                ),
+                kind="neutral",
+            ),
+        )
 
     _state_mean, _state_std, _T_MAX, _DT, _du_mean, _du_std = norm_stats
     _H = horizon_slider.value
@@ -1367,7 +1380,7 @@ def parametric_intro(mo):
     of attractors at once. At inference, setting $\rho$ yields a continuous vector field for
     that attractor without retraining.
 
-    This is Not in the original paper. It is the notebook's primary novel contribution.
+    This is not in the original paper. It is the notebook's primary novel contribution.
     The model conditions on normalised $\rho$ as an extra input feature, concatenated alongside
     the sinusoidal time embedding and state vector in the same MLP forward pass. The network learns
     a parameterised family of vector fields in a single training run, using trajectories sampled
@@ -1462,7 +1475,7 @@ def parametric_training(
     param_cfo_model = TinyODENetParam(state_dim=3, hidden=_HIDDEN_P)
     _opt_p = torch.optim.Adam(param_cfo_model.parameters(), lr=_LR_P)
     _losses_p = []
-    for _ep_p in range(_EPOCHS_P):
+    for _ep_p in mo.status.progress_bar(range(_EPOCHS_P), title="Training Parametric CFO"):
         _perm = np.random.permutation(_N_P)
         _ep_loss = 0.0
         for _i in range(0, _N_P, _BATCH_P):
@@ -1636,7 +1649,7 @@ def click_intro(mo):
     mo.md(r"""
     ### Interactive Exploration
 
-    The heatmap below shows the speed of the learned parametric vector field in the $x$–$y$ plane (with $z$ fixed). **Click anywhere on the heatmap** to set an initial condition and launch a trajectory. The parametric CFO model instantly adapts to the chosen $\rho$ without retraining.
+    The heatmap below shows the velocity magnitude $\|\mathcal{N}_\theta(t, u, \rho)\|$ of the learned parametric vector field in the $x$–$y$ plane (with $z$ fixed). **Click anywhere on the heatmap** to set an initial condition and launch a trajectory. The parametric CFO model instantly adapts to the chosen $\rho$ without retraining.
     """)
     return
 
@@ -1683,7 +1696,7 @@ def field_click_panel(
             z=_speed,
             colorscale="Viridis",
             showscale=True,
-            colorbar=dict(title="speed"),
+            colorbar=dict(title="‖v‖"),
         )
     )
     _fig_click.update_layout(
