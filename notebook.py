@@ -1822,6 +1822,8 @@ def takeaways(mo):
     The toy demo faithfully reproduces the *conceptual* CFO advantages. The magnitude
     of the gains scales dramatically with problem complexity and model capacity.
 
+    **A note on chaos.** The Lorenz system at standard parameters has a maximal Lyapunov exponent $\lambda \approx 0.906$ (Sparrow 1982, Viswanath 1998), so any two nearby trajectories diverge as $\exp(\lambda t)$. One Lyapunov time is therefore $\tau = 1/\lambda \approx 1.10$ time units, which at $\Delta t = 0.025$ is $\approx 44$ RK4 steps. After roughly 2-3 Lyapunov times ($\approx 90$-$130$ steps), pointwise agreement between any surrogate and the true trajectory is fundamentally impossible, even with a perfectly-trained model. The long rollouts in the interactive panels above eventually drift from the reference trajectory: this is a property of chaos, not a model failure. The relevant CFO signals are short-horizon trajectory accuracy, vector-field fidelity, and reproduction of the attractor's invariant geometry, not long-horizon pointwise RMSE.
+
     ---
 
     **Paper**: [alphaxiv:2512.05297](https://alphaxiv.org/abs/2512.05297)
