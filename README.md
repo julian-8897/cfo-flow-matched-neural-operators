@@ -1,6 +1,6 @@
 # Parametric Flow Operators: Learning Families of Chaotic Attractors
 
-[![marimo demo](https://img.shields.io/badge/marimo-Live%20Demo-blue?style=for-the-badge&logo=marimo)](https://molab.marimo.io/notebooks/nb_KjqXxSQBsdQUwggJE6qDh3)
+[![marimo demo](https://img.shields.io/badge/marimo-Live%20Demo-blue?style=for-the-badge&logo=marimo)](https://molab.marimo.io/notebooks/nb_Wmpjguv2BLi7S986wWpSm5)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 > Autoregressive models break when you change the time resolution or when you have sparse observations.
@@ -26,7 +26,7 @@ parameter **ρ**, enabling a *single model* to represent the full family of attr
 - Generate a continuous vector field for any specific system configuration on demand
 - Explore trajectories interactively — launch from arbitrary initial conditions via a live heatmap
 
-> **[Try it live in the browser →](https://molab.marimo.io/notebooks/nb_KjqXxSQBsdQUwggJE6qDh3)**
+> **[Try it live in the browser →](https://molab.marimo.io/notebooks/nb_Wmpjguv2BLi7S986wWpSm5)**
 >
 > *Features: real-time resolution adjustment, trajectory launching, and parametric family exploration.*
 
